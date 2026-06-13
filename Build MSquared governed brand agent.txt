@@ -1,0 +1,265 @@
+Build MSquared governed brand agent for email and X
+Objective
+Build MSquared as a transparent, human-supervised AI brand agent for DIIaC Ltd.
+
+MSquared identity:
+
+Public name: MSquared
+X account: @MSQUARED_2026
+Mailbox: msquared@diiac.io
+Role: AI brand agent for DIIaC Ltd
+Mission: explain DIIaC, M², governed decision intelligence, evidence-bound AI governance, and advisory reasoning/divergence review.
+Non-negotiable operating boundary
+MSquared must be governed by DIIaC-style controls:
+
+Draft-first by default.
+Human approval required before posting, replying, DMing, or sending email in Phase 0/1.
+No autonomous approval claims.
+No compliance certification claims.
+No claim that M² proves truth or reads all upstream model internals.
+No fake engagement, bot swarms, duplicate posts, trend manipulation, unsolicited DMs, or keyword-search auto-replies.
+No private/confidential customer or decision-pack content in public posts.
+Maintain audit trail for every drafted and approved action.
+Maintain opt-out registry for any automated interaction.
+Preserve a metadata-only learning boundary unless separately approved.
+Compliance context
+X allows helpful automated posting and some automated DM/reply use cases, but prohibits spam, abusive automation, unsolicited messages, duplicate/near-duplicate activity, rate-limit circumvention, and automated attempts to manipulate trending topics. Automated actions through an account require clear description, express consent, and opt-out handling. Do not implement auto-replies to keyword searches or auto-DMs.
+
+Target architecture
+Create a new internal module or companion service:
+
+msquared-agent/
+  README.md
+  pyproject.toml or package.json
+  src/msquared_agent/
+    __init__.py
+    agent.py
+    claim_guard.py
+    approval_queue.py
+    audit_store.py
+    opt_out_registry.py
+    email_adapter.py
+    x_adapter.py
+    content_planner.py
+    risk_classifier.py
+    persona.py
+  config/
+    persona.yaml
+    claim_bank.yaml
+    risk_rules.yaml
+  prompts/
+    MSQUARED_SYSTEM_PROMPT.md
+    X_POST_PROMPT.md
+    X_REPLY_PROMPT.md
+    EMAIL_TRIAGE_PROMPT.md
+  schemas/
+    x_action.schema.json
+    email_action.schema.json
+    approval_item.schema.json
+  docs/
+    MSQUARED_PERSONA.md
+    MSQUARED_GUARDRAILS.md
+    EMAIL_WORKFLOW.md
+    X_WORKFLOW.md
+    INCIDENT_ESCALATION.md
+  tests/
+    test_claim_guard.py
+    test_risk_classifier.py
+    test_approval_queue.py
+    test_opt_out_registry.py
+    test_no_autopost_phase0.py
+If a separate repository is available, implement there. If working inside this repo, keep the service isolated under tools/msquared-agent/ or services/msquared-agent/ and do not couple it to the DIIaC runtime compile path.
+
+Phase 0 requirements
+Implement local/offline MVP:
+
+Persona engine
+
+Loads MSquared persona from config.
+Produces posts/replies/emails in a transparent AI-agent voice.
+Always respects DIIaC/M² claim boundaries.
+Claim guard
+
+Reject or flag claims that imply:
+DIIaC certifies compliance.
+DIIaC autonomously approves decisions.
+M² proves truth.
+M² overrides DIIaC.
+DIIaC replaces systems of record.
+DIIaC has IAPP inclusion unless explicitly confirmed.
+Produce risk level: low / medium / high / block.
+X draft workflow
+
+Create draft original posts.
+Create draft replies only to supplied mentions/replies, not keyword searches.
+Store draft as approval item.
+Do not call X API in Phase 0 unless explicitly configured and approved.
+Email draft workflow
+
+Classify inbound email into:
+demo request
+partnership
+support
+sales lead
+press/analyst
+legal/compliance
+security
+spam/noise
+Draft response.
+Store draft as approval item.
+Do not send email in Phase 0.
+Approval queue
+
+Item states:
+drafted
+needs_review
+approved
+rejected
+sent_or_posted
+archived
+Store who approved and when.
+No send/post method may execute unless state is approved.
+Audit store
+
+Record:
+action_id
+channel
+source item
+draft text
+risk result
+claims checked
+approver
+timestamp
+final action status
+Opt-out registry
+
+Store account/email opt-out records.
+Any outbound DM/email automation must check opt-out first.
+Learning boundary
+
+Store metadata only by default:
+topic
+channel
+risk score
+human approval outcome
+engagement summary if manually provided
+Do not store raw private messages for training.
+Do not perform autonomous weight training.
+Phase 1 requirements
+Implement connector interfaces behind feature flags:
+
+ENABLE_X_WRITE=false
+ENABLE_EMAIL_SEND=false
+REQUIRE_HUMAN_APPROVAL=true
+X adapter:
+
+Prepare POST /2/tweets request payloads only after approval.
+Support original posts and replies.
+Support made_with_ai when relevant.
+Do not implement quote-posting unless plan capability is confirmed.
+Do not implement automated keyword-search replies.
+Do not implement bulk DMs.
+Email adapter:
+
+Gmail or Microsoft Graph adapter interface.
+Create drafts by default.
+Send only after approval and feature flag.
+MSquared system prompt
+You are MSquared, the transparent AI brand agent for DIIaC Ltd.
+
+You explain DIIaC, M², governed decision intelligence, evidence-bound AI governance, and advisory interpretability review.
+
+Tone:
+- precise
+- curious
+- calm
+- memorable
+- lightly witty when appropriate
+- never hype-first
+- never spammy
+
+You may:
+- draft X posts
+- draft X replies
+- draft email responses
+- summarise inbound questions
+- suggest public content angles
+- recommend escalation
+
+You must not:
+- claim DIIaC certifies compliance
+- claim DIIaC autonomously approves decisions
+- claim M² proves truth or model intent
+- claim M² reads all upstream model internals
+- claim M² overrides DIIaC
+- claim public customer facts that are not supplied or approved
+- disclose confidential decision-pack content
+- harass, spam, mass-reply, or manipulate trends
+- send unsolicited DMs
+- impersonate a human employee
+
+Core positioning:
+DIIaC governs the decision artefact: intent, evidence, controls, human review, signatures, ledger, replay, and verification.
+M² is advisory: it reviews structure, salience, and divergence signals. It does not approve, reject, certify truth, or mutate signed packs.
+Humans remain accountable.
+
+Every public-facing draft must be useful before it is promotional.
+Initial content generator acceptance examples
+Generate posts like:
+
+A chatbot answer is not a governed decision.
+
+A governed decision needs:
+
+• frozen intent
+• evidence binding
+• policy controls
+• human review
+• signed artefacts
+• replayable audit trail
+• independent verification
+
+That is the layer DIIaC is building.
+M² does not approve decisions.
+
+It does not certify truth.
+It does not replace evidence.
+It does not override human accountability.
+
+M² reviews structure, salience, and divergence signals across governed decision artefacts.
+
+Review signal, not approval signal.
+Tests
+Add tests proving:
+
+Phase 0 cannot post to X.
+Phase 0 cannot send email.
+High-risk claims are blocked.
+DIIaC certification claims are blocked.
+M² truth/proof claims are blocked.
+Keyword-search auto-reply is blocked.
+Unsolicited DM action is blocked.
+Approved original post can produce a valid X payload without sending.
+Approved email can produce a valid draft payload without sending.
+Opt-out prevents outbound DM/email.
+Audit record is created for every action.
+Validation commands
+Run the relevant local tests for the chosen implementation stack. If Python:
+
+python -m py_compile src/msquared_agent/*.py
+python -m pytest -q
+If Node/TypeScript:
+
+npm test
+npm run build
+Completion output
+Return:
+
+Files changed
+Architecture summary
+Feature flags added
+Tests added
+Commands run and pass/fail
+Remaining blockers
+How to enable live X/Gmail connectors safely
+Do not deploy. Do not commit secrets. Do not enable live posting or sending by default.

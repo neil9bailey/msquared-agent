@@ -1,0 +1,15 @@
+blocked_claims:
+  - id: diia_certifies_compliance
+    description: DIIaC must not claim it certifies or guarantees compliance.
+  - id: diia_autonomously_approves
+    description: DIIaC/MSquared must not claim autonomous approval authority.
+  - id: m2_proves_truth
+    description: MSquared must not claim truth, model intent, or certification.
+  - id: m2_reads_model_internals
+    description: MSquared must not claim full access to upstream model internals.
+  - id: m2_or_diiac_overrides
+    description: MSquared/DIIaC must not claim override authority.
+  - id: replaces_systems_of_record
+    description: DIIaC must not claim to replace systems of record.
+  - id: unconfirmed_iapp_inclusion
+    description: Do not claim IAPP inclusion unless explicitly confirmed.

@@ -1,0 +1,20 @@
+[project]
+name = "msquared-agent"
+version = "0.1.0"
+description = "Governed brand agent for DIIaC"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic",
+    "pyyaml",
+    "python-dateutil",
+    "streamlit",
+    "tweepy>=4.0",
+    "requests",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+msquared = "msquared_agent.agent:main"
+msquared-gui = "msquared_agent.desktop_ui:main"

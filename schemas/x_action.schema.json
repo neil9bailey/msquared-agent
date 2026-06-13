@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MSquared X Action",
+  "type": "object",
+  "required": ["method", "endpoint", "json", "metadata"],
+  "properties": {
+    "method": { "const": "POST" },
+    "endpoint": { "const": "/2/tweets" },
+    "json": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1 },
+        "reply": {
+          "type": "object",
+          "properties": {
+            "in_reply_to_tweet_id": { "type": "string" }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["made_with_ai", "approval_item_id"],
+      "properties": {
+        "made_with_ai": { "type": "boolean" },
+        "approval_item_id": { "type": "string" }
+      }
+    }
+  }
+}

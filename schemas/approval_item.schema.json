@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MSquared Approval Item",
+  "type": "object",
+  "required": ["id", "type", "channel", "draft", "risk_level", "status", "created_at"],
+  "properties": {
+    "id": { "type": "string" },
+    "type": { "enum": ["x_post", "x_reply", "email_response", "email", "x_dm"] },
+    "channel": { "enum": ["x", "email", "manual"] },
+    "draft": { "type": "string" },
+    "risk_level": { "enum": ["low", "medium", "high", "block"] },
+    "status": { "enum": ["drafted", "needs_review", "approved", "rejected", "sent_or_posted", "archived"] },
+    "approved_by": { "type": "string" },
+    "created_at": { "type": "string" }
+  }
+}

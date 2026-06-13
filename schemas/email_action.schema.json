@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MSquared Email Action",
+  "type": "object",
+  "required": ["to", "subject", "body", "metadata"],
+  "properties": {
+    "to": { "type": "string", "minLength": 3 },
+    "subject": { "type": "string", "minLength": 1 },
+    "body": { "type": "string", "minLength": 1 },
+    "metadata": {
+      "type": "object",
+      "required": ["made_with_ai", "approval_item_id"],
+      "properties": {
+        "made_with_ai": { "type": "boolean" },
+        "approval_item_id": { "type": "string" }
+      }
+    }
+  }
+}

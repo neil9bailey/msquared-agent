@@ -1,0 +1,12 @@
+risk_levels:
+  low: Safe to put into the approval queue.
+  medium: Needs human review before approval.
+  high: Sensitive; review carefully and rewrite if needed.
+  block: Cannot be approved until the draft is changed.
+
+blocked_automation:
+  - keyword_search_auto_reply
+  - unsolicited_dm
+  - duplicate_or_near_duplicate_bulk_posting
+  - trend_manipulation
+  - sending_or_posting_without_approval

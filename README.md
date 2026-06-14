@@ -110,6 +110,25 @@ To enable live posting or sending, keep `REQUIRE_HUMAN_APPROVAL=true`, provide X
 
 For X profile monitoring, set `X_MONITOR_USER_ID=2065865497237729280` for `@MSQUARED_2026`. A handle can be entered, but that requires X's user lookup endpoint first; using the numeric id avoids that extra paid/API lookup. Search monitoring can also use `X_MONITOR_QUERY`, but replies to search-derived items remain blocked by default.
 
+## Troubleshooting X 401 Unauthorized
+Use **Settings -> Readiness -> Test X Connection** to run a read-only check before refreshing feeds or posting approved items. The result is shown in the readiness panel and logged in Diagnostics.
+
+Common 401 causes:
+
+- The saved OAuth 2.0 access token has expired and no refresh token is configured.
+- The access token was issued before the X app permissions were changed to **Read and write**.
+- The token is an app-only bearer token where the workflow needs OAuth 2.0 user-context access.
+- The OAuth 2.0 scopes are missing `users.read`, `tweet.read`, `tweet.write`, or `offline.access`.
+- The token belongs to a different X user than the configured MSquared account.
+
+Fix sequence:
+
+1. In the X Developer Portal, confirm app permissions are **Read and write** or **Read and write and Direct message**.
+2. Re-generate OAuth 2.0 user-context access and refresh tokens for the MSquared account.
+3. Save both tokens in **Settings -> Admin**.
+4. Confirm `X_MONITOR_USER_ID` is the numeric user id for `@MSQUARED_2026` to avoid an extra handle lookup call.
+5. Click **Test X Connection**, then refresh X once the test passes.
+
 ## Diagnostics and logs
 Open **Diagnostics** in the desktop console to inspect:
 

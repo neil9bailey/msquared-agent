@@ -15,7 +15,7 @@ from msquared_agent.intake_store import add_intake_item, list_intake, update_int
 from msquared_agent.paths import app_root
 from msquared_agent.product_knowledge import build_product_knowledge_index, build_validation_packet, knowledge_status
 from msquared_agent.settings import DEFAULT_FEATURE_FLAGS, load_feature_flags, save_feature_flags
-from msquared_agent.x_adapter import fetch_x_feed, post_approved_tweet, prepare_x_payload
+from msquared_agent.x_adapter import fetch_x_feed, post_approved_tweet, prepare_x_payload, test_x_connection
 
 
 class MSquaredDesktopApp(tk.Tk):
@@ -572,6 +572,7 @@ class MSquaredDesktopApp(tk.Tk):
         header.grid(row=0, column=0, sticky="ew")
         ttk.Label(header, text="Connector Readiness", style="Panel.TLabel", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT)
         ttk.Button(header, text="Validate", command=self.refresh_connector_status).pack(side=tk.RIGHT)
+        ttk.Button(header, text="Test X Connection", command=self.test_x_connection).pack(side=tk.RIGHT, padx=(0, 8))
         self.connector_status_box = tk.Text(status_frame, height=12, wrap=tk.NONE, font=("Consolas", 9), state=tk.DISABLED)
         self.connector_status_box.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
         self.refresh_connector_status()
@@ -1094,6 +1095,26 @@ class MSquaredDesktopApp(tk.Tk):
         status = connector_status()
         self._set_text(self.connector_status_box, json.dumps(status, indent=2))
         self.status_text.set("Connector readiness refreshed. Secrets are masked or omitted.")
+        self.refresh_diagnostics()
+
+    def test_x_connection(self):
+        try:
+            result = test_x_connection({})
+        except Exception as exc:
+            log_event("x_connection_test_ui_failed", "error", "X connection test failed in desktop console.", {"error": str(exc)})
+            messagebox.showerror("X connection test failed", str(exc))
+            self.status_text.set("X connection test failed. See Diagnostics.")
+            self.refresh_diagnostics()
+            return
+
+        status = connector_status()
+        self._set_text(self.connector_status_box, json.dumps({"x_connection_test": result, "connector_readiness": status}, indent=2))
+        if result.get("ok"):
+            messagebox.showinfo("X connection test", result.get("message", "X connection test passed."))
+            self.status_text.set("X connection test passed.")
+        else:
+            messagebox.showwarning("X connection test", result.get("message", "X connection test failed."))
+            self.status_text.set("X connection test failed. See Diagnostics.")
         self.refresh_diagnostics()
 
     def refresh_diagnostics(self):

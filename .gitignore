@@ -3,7 +3,8 @@
 
 build/
 dist/
-data/
+data/*
+!data/sample_intake.json
 local-runtime-backups/
 *.egg-info/
 

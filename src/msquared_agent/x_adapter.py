@@ -3,6 +3,9 @@ import base64
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
+import requests
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
 from .app_log import log_event
 from .approval_queue import add_to_queue
 from .approval_queue import get_approval_item, mark_sent_or_posted
@@ -14,10 +17,17 @@ from .settings import feature_enabled
 
 
 X_API_BASE = "https://api.x.com"
+TRANSIENT_X_STATUSES = {408, 409, 429, 500, 502, 503, 504}
 PAYMENT_REQUIRED_HELP = (
     "X API returned 402 Payment Required. This usually means the current X API project plan "
     "does not include the requested endpoint. Use the numeric X user id to avoid handle lookup, "
     "and check that your plan includes user lookup, mentions, and recent search."
+)
+UNAUTHORIZED_HELP = (
+    "X API returned 401 Unauthorized. Check that the saved OAuth 2.0 access token is a user-context "
+    "token for the MSquared account, not the app-only bearer token; that it was issued after the app "
+    "permissions were set to Read and write; that the scopes include users.read, tweet.read, tweet.write, "
+    "and offline.access; and that the refresh token is present so the app can renew expired access tokens."
 )
 
 
@@ -77,8 +87,6 @@ def fetch_x_feed(config: dict | None = None) -> list:
         return items
 
     try:
-        import requests
-
         http_get = config.get("http_get") or requests.get
         mention_count, search_count, source_errors = _fetch_x_feed_with_token(
             items,
@@ -106,7 +114,6 @@ def fetch_x_feed(config: dict | None = None) -> list:
         if _is_unauthorized(exc) and _has_oauth2_refresh_token(config):
             try:
                 refreshed_token = refresh_oauth2_access_token(config)
-                import requests
 
                 http_get = config.get("http_get") or requests.get
                 mention_count, search_count, source_errors = _fetch_x_feed_with_token(
@@ -163,7 +170,8 @@ def _fetch_x_feed_with_token(items, bearer_token, monitor_user_id, query, config
     if monitor_user_id:
         try:
             resolved_user_id = _resolve_x_user_id(monitor_user_id, headers, http_get)
-            response = http_get(
+            response = _x_get_with_retry(
+                http_get,
                 f"{X_API_BASE}/2/users/{resolved_user_id}/mentions",
                 params={
                     "max_results": config.get("max_results", 10),
@@ -172,7 +180,6 @@ def _fetch_x_feed_with_token(items, bearer_token, monitor_user_id, query, config
                 headers=headers,
                 timeout=20,
             )
-            response.raise_for_status()
             for tweet in response.json().get("data", []):
                 items.append(_add_x_tweet(tweet, "x_mention"))
                 mention_count += 1
@@ -181,7 +188,8 @@ def _fetch_x_feed_with_token(items, bearer_token, monitor_user_id, query, config
 
     if query:
         try:
-            response = http_get(
+            response = _x_get_with_retry(
+                http_get,
                 f"{X_API_BASE}/2/tweets/search/recent",
                 params={
                     "query": query,
@@ -191,7 +199,6 @@ def _fetch_x_feed_with_token(items, bearer_token, monitor_user_id, query, config
                 headers=headers,
                 timeout=20,
             )
-            response.raise_for_status()
             for tweet in response.json().get("data", []):
                 items.append(_add_x_tweet(tweet, "x_monitor"))
                 search_count += 1
@@ -235,11 +242,14 @@ def _is_unauthorized(exc: Exception) -> bool:
 
 def _http_status(exc: Exception) -> int | None:
     response = getattr(exc, "response", None)
-    status = getattr(response, "status_code", None)
+    status = getattr(response, "status_code", None) or getattr(response, "status", None)
+    if status:
+        return int(status)
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
     if status:
         return int(status)
     text = str(exc)
-    for candidate in (400, 401, 402, 403, 404, 429, 500, 502, 503):
+    for candidate in (400, 401, 402, 403, 404, 408, 409, 429, 500, 502, 503, 504):
         if str(candidate) in text:
             return candidate
     return None
@@ -249,12 +259,93 @@ def _x_failure_message(exc: Exception) -> str:
     if _http_status(exc) == 402:
         return PAYMENT_REQUIRED_HELP
     if _http_status(exc) == 401:
-        return "X refresh failed with 401 Unauthorized. Check OAuth 2.0 token freshness, scopes, and app permissions."
+        detail = _x_error_detail(exc)
+        return f"{UNAUTHORIZED_HELP} Provider detail: {detail}" if detail else UNAUTHORIZED_HELP
     if _http_status(exc) == 403:
         return "X refresh failed with 403 Forbidden. Check X app permissions, OAuth scopes, and endpoint access."
     if _http_status(exc) == 429:
         return "X refresh failed because the X API rate limit was exceeded."
     return "X refresh failed. Check X credentials, permissions, rate limits, and monitor settings."
+
+
+def _x_error_detail(exc: Exception) -> str:
+    response = getattr(exc, "response", None)
+    if response is None:
+        return ""
+    try:
+        payload = response.json()
+    except Exception:
+        return str(getattr(response, "text", "") or "")[:320]
+
+    parts = []
+    for key in ("title", "detail", "type"):
+        if payload.get(key):
+            parts.append(str(payload[key]))
+    for error in payload.get("errors", []) if isinstance(payload.get("errors"), list) else []:
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("detail") or error.get("title")
+            if message:
+                parts.append(str(message))
+    return " | ".join(parts)[:320]
+
+
+def _is_transient_x_exception(exc: Exception) -> bool:
+    if _http_status(exc) in TRANSIENT_X_STATUSES:
+        return True
+    return isinstance(exc, (requests.Timeout, requests.ConnectionError))
+
+
+def _log_x_retry(retry_state) -> None:
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    log_event(
+        "x_api_retry",
+        "warning",
+        "Transient X API failure; retrying request.",
+        {
+            "attempt": retry_state.attempt_number,
+            "http_status": _http_status(exc) if exc else None,
+            "error": str(exc) if exc else "",
+        },
+    )
+
+
+@retry(
+    retry=retry_if_exception(_is_transient_x_exception),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.2, min=0.2, max=2),
+    before_sleep=_log_x_retry,
+    reraise=True,
+)
+def _x_get_with_retry(http_get, url: str, **kwargs):
+    response = http_get(url, **kwargs)
+    response.raise_for_status()
+    return response
+
+
+@retry(
+    retry=retry_if_exception(_is_transient_x_exception),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.2, min=0.2, max=2),
+    before_sleep=_log_x_retry,
+    reraise=True,
+)
+def _x_post_with_retry(http_post, url: str, **kwargs):
+    response = http_post(url, **kwargs)
+    response.raise_for_status()
+    return response
+
+
+@retry(
+    retry=retry_if_exception(_is_transient_x_exception),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.2, min=0.2, max=2),
+    before_sleep=_log_x_retry,
+    reraise=True,
+)
+def _create_tweet_with_retry(client, kwargs: dict, user_auth=None):
+    if user_auth is None:
+        return client.create_tweet(**kwargs)
+    return client.create_tweet(user_auth=user_auth, **kwargs)
 
 
 def refresh_oauth2_access_token(config: dict | None = None) -> str:
@@ -267,8 +358,6 @@ def refresh_oauth2_access_token(config: dict | None = None) -> str:
     if not client_id:
         raise RuntimeError("X_CLIENT_ID is required to refresh OAuth 2.0 tokens.")
 
-    import requests
-
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     data = {
         "grant_type": "refresh_token",
@@ -280,13 +369,13 @@ def refresh_oauth2_access_token(config: dict | None = None) -> str:
     else:
         data["client_id"] = client_id
 
-    response = requests.post(
+    response = _x_post_with_retry(
+        requests.post,
         "https://api.x.com/2/oauth2/token",
         headers=headers,
         data=data,
         timeout=20,
     )
-    response.raise_for_status()
     payload = response.json()
     access_token = payload.get("access_token")
     if not access_token:
@@ -321,13 +410,13 @@ def _resolve_x_user_id(value: str, headers: dict, http_get) -> str:
     if not username:
         raise ValueError("X monitor user id or handle is blank.")
 
-    response = http_get(
+    response = _x_get_with_retry(
+        http_get,
         f"{X_API_BASE}/2/users/by/username/{quote(username)}",
         params={"user.fields": "id,username"},
         headers=headers,
         timeout=20,
     )
-    response.raise_for_status()
     data = response.json().get("data") or {}
     resolved = str(data.get("id", "")).strip()
     if not resolved.isdigit():
@@ -339,6 +428,122 @@ def _resolve_x_user_id(value: str, headers: dict, http_get) -> str:
         {"username": username, "resolved_user_id": resolved},
     )
     return resolved
+
+
+def test_x_connection(config: dict | None = None) -> dict:
+    """Run a read-only X auth diagnostic without posting or sending."""
+    config = config or {}
+    load_env_file()
+    http_get = config.get("http_get") or requests.get
+    oauth2_access_token = config.get("oauth2_access_token") or get_env("X_OAUTH2_ACCESS_TOKEN")
+    app_bearer_token = config.get("bearer_token") or get_env("X_BEARER_TOKEN")
+    monitor_user_id = config.get("monitor_user_id") if "monitor_user_id" in config else get_env("X_MONITOR_USER_ID")
+    checks = []
+
+    if not oauth2_access_token and _has_oauth2_refresh_token(config):
+        oauth2_access_token = refresh_oauth2_access_token(config)
+        checks.append({"name": "oauth2_refresh", "ok": True})
+
+    if oauth2_access_token:
+        headers = {"Authorization": f"Bearer {oauth2_access_token}"}
+        auth_mode = "oauth2_user"
+        try:
+            response = _x_get_with_retry(
+                http_get,
+                f"{X_API_BASE}/2/users/me",
+                params={"user.fields": "id,username"},
+                headers=headers,
+                timeout=20,
+            )
+        except Exception as exc:
+            if not _is_unauthorized(exc) or not _has_oauth2_refresh_token(config):
+                return _x_connection_result(False, auth_mode, checks, exc)
+            oauth2_access_token = refresh_oauth2_access_token(config)
+            headers = {"Authorization": f"Bearer {oauth2_access_token}"}
+            try:
+                response = _x_get_with_retry(
+                    http_get,
+                    f"{X_API_BASE}/2/users/me",
+                    params={"user.fields": "id,username"},
+                    headers=headers,
+                    timeout=20,
+                )
+                checks.append({"name": "oauth2_refresh_after_401", "ok": True})
+            except Exception as refresh_exc:
+                return _x_connection_result(False, auth_mode, checks, refresh_exc)
+
+        data = response.json().get("data") or {}
+        checks.append({
+            "name": "authenticated_user",
+            "ok": True,
+            "user_id": str(data.get("id", "")),
+            "username": str(data.get("username", "")),
+        })
+        log_event("x_connection_test_complete", "info", "X OAuth 2.0 connection test completed.", {"auth_mode": auth_mode})
+        return {
+            "ok": True,
+            "auth_mode": auth_mode,
+            "message": f"X OAuth 2.0 user-context token is valid for @{data.get('username', 'unknown')}.",
+            "http_status": 200,
+            "checks": checks,
+        }
+
+    if app_bearer_token:
+        auth_mode = "app_bearer"
+        headers = {"Authorization": f"Bearer {app_bearer_token}"}
+        if not monitor_user_id:
+            message = "App bearer token is configured, but no X_MONITOR_USER_ID is set for a read-only validation call."
+            log_event("x_connection_test_failed", "warning", message, {"auth_mode": auth_mode})
+            return {"ok": False, "auth_mode": auth_mode, "message": message, "http_status": None, "checks": checks}
+        try:
+            resolved_user_id = _resolve_x_user_id(monitor_user_id, headers, http_get)
+            response = _x_get_with_retry(
+                http_get,
+                f"{X_API_BASE}/2/users/{resolved_user_id}",
+                params={"user.fields": "id,username"},
+                headers=headers,
+                timeout=20,
+            )
+            data = response.json().get("data") or {}
+            checks.append({
+                "name": "monitor_user_lookup",
+                "ok": True,
+                "user_id": str(data.get("id") or resolved_user_id),
+                "username": str(data.get("username", "")),
+            })
+            log_event("x_connection_test_complete", "info", "X app bearer connection test completed.", {"auth_mode": auth_mode})
+            return {
+                "ok": True,
+                "auth_mode": auth_mode,
+                "message": f"X app bearer token can read the monitor user {data.get('username') or resolved_user_id}.",
+                "http_status": 200,
+                "checks": checks,
+            }
+        except Exception as exc:
+            return _x_connection_result(False, auth_mode, checks, exc)
+
+    message = "No X OAuth 2.0 access token, refresh token, or app bearer token is configured."
+    log_event("x_connection_test_failed", "warning", message, {"auth_mode": "missing"})
+    return {"ok": False, "auth_mode": "missing", "message": message, "http_status": None, "checks": checks}
+
+
+def _x_connection_result(ok: bool, auth_mode: str, checks: list[dict], exc: Exception) -> dict:
+    message = _x_failure_message(exc)
+    result = {
+        "ok": ok,
+        "auth_mode": auth_mode,
+        "message": message,
+        "http_status": _http_status(exc),
+        "provider_detail": _x_error_detail(exc),
+        "checks": checks,
+    }
+    log_event(
+        "x_connection_test_failed",
+        "warning",
+        "X connection test failed.",
+        {"auth_mode": auth_mode, "http_status": result["http_status"], "message": message},
+    )
+    return result
 
 
 def _add_x_tweet(tweet: dict, source_type: str) -> dict:
@@ -428,13 +633,13 @@ def post_approved_tweet(item_id: str, client_config: dict | None = None):
                 oauth2_access_token = refresh_oauth2_access_token(config)
             client = tweepy.Client(bearer_token=oauth2_access_token, wait_on_rate_limit=True)
             try:
-                result = client.create_tweet(user_auth=False, **_tweet_kwargs_from_payload(payload["json"]))
+                result = _create_tweet_with_retry(client, _tweet_kwargs_from_payload(payload["json"]), user_auth=False)
             except Exception as exc:
                 if not _is_unauthorized(exc) or not _has_oauth2_refresh_token(config):
                     raise
                 oauth2_access_token = refresh_oauth2_access_token(config)
                 client = tweepy.Client(bearer_token=oauth2_access_token, wait_on_rate_limit=True)
-                result = client.create_tweet(user_auth=False, **_tweet_kwargs_from_payload(payload["json"]))
+                result = _create_tweet_with_retry(client, _tweet_kwargs_from_payload(payload["json"]), user_auth=False)
         else:
             consumer_key = config.get("consumer_key") or get_env("X_CONSUMER_KEY") or get_env("X_API_KEY")
             consumer_secret = config.get("consumer_secret") or get_env("X_CONSUMER_SECRET") or get_env("X_API_SECRET")
@@ -446,7 +651,7 @@ def post_approved_tweet(item_id: str, client_config: dict | None = None):
                 access_token_secret=config.get("access_token_secret") or get_env("X_ACCESS_TOKEN_SECRET"),
                 wait_on_rate_limit=True,
             )
-            result = client.create_tweet(**_tweet_kwargs_from_payload(payload["json"]))
+            result = _create_tweet_with_retry(client, _tweet_kwargs_from_payload(payload["json"]))
         mark_sent_or_posted(item_id)
         log_event("x_post_complete", "info", "Approved X item posted.", {"approval_item_id": item_id})
         log_action({

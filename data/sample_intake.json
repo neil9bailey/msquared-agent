@@ -1,0 +1,17 @@
+[
+  {
+    "channel": "x",
+    "source_type": "x_mention",
+    "source_id": "sample-x-mention-001",
+    "author": "sample_operator",
+    "text": "How does DIIaC keep AI decisions evidence-bound without claiming the AI is always right?",
+    "url": "https://x.com/sample/status/sample-x-mention-001"
+  },
+  {
+    "channel": "email",
+    "source_type": "website_contact",
+    "from": "prospect@example.com",
+    "subject": "Request for DIIaC and M2 information",
+    "text": "We are evaluating governed AI decision assurance for enterprise workflows. Can MSquared explain how DIIaC and M2 fit together?"
+  }
+]

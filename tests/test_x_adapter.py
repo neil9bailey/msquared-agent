@@ -1,7 +1,9 @@
+import requests
+
 from msquared_agent.app_log import read_log_events
 from msquared_agent.env_loader import read_env_values
 from msquared_agent.settings import save_feature_flags
-from msquared_agent.x_adapter import fetch_x_feed, refresh_oauth2_access_token
+from msquared_agent.x_adapter import fetch_x_feed, refresh_oauth2_access_token, test_x_connection as run_x_connection_test
 
 
 class FakeResponse:
@@ -15,7 +17,9 @@ class FakeResponse:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise RuntimeError(f"{self.status_code} error for {self.url}")
+            error = requests.HTTPError(f"{self.status_code} error for {self.url}")
+            error.response = self
+            raise error
 
 
 def test_x_monitor_handle_is_resolved_before_mentions_fetch():
@@ -67,6 +71,59 @@ def test_x_monitor_numeric_id_skips_handle_resolution():
     assert calls == ["https://api.x.com/2/users/2065865497237729280/mentions"]
 
 
+def test_x_feed_retries_transient_mention_failure():
+    save_feature_flags({"ENABLE_X_READ": True})
+    calls = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append(url)
+        if "/mentions" in url and calls.count(url) == 1:
+            return FakeResponse({"title": "Temporary upstream error"}, status_code=500, url=url)
+        if "/mentions" in url:
+            return FakeResponse(
+                {"data": [{"id": "tweet_1", "author_id": "author_1", "text": "Retry worked"}]},
+                url=url,
+            )
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    items = fetch_x_feed({
+        "oauth2_access_token": "test-token",
+        "monitor_user_id": "2065865497237729280",
+        "query": "",
+        "http_get": fake_get,
+    })
+
+    assert len(items) == 1
+    assert calls.count("https://api.x.com/2/users/2065865497237729280/mentions") == 2
+    assert any(event["event"] == "x_api_retry" for event in read_log_events())
+
+
+def test_x_unauthorized_logs_actionable_message():
+    save_feature_flags({"ENABLE_X_READ": True})
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        return FakeResponse(
+            {"title": "Unauthorized", "detail": "Token has expired."},
+            status_code=401,
+            url=url,
+        )
+
+    items = fetch_x_feed({
+        "oauth2_access_token": "expired-token",
+        "monitor_user_id": "2065865497237729280",
+        "query": "",
+        "http_get": fake_get,
+    })
+
+    events = read_log_events()
+    failure = next(event for event in events if event["event"] == "x_fetch_failed")
+    assert items == []
+    assert failure["details"]["http_status"] == 401
+    assert "user-context token" in failure["message"]
+    assert "offline.access" in failure["message"]
+    assert "Token has expired" in failure["message"]
+
+
 def test_x_search_payment_required_logs_partial_warning_after_mentions():
     save_feature_flags({"ENABLE_X_READ": True})
 
@@ -115,8 +172,6 @@ def test_x_payment_required_logs_actionable_message():
 
 
 def test_oauth2_refresh_saves_rotated_tokens(monkeypatch):
-    import requests
-
     captured = {}
 
     def fake_post(url, headers=None, data=None, timeout=None):
@@ -149,3 +204,41 @@ def test_oauth2_refresh_saves_rotated_tokens(monkeypatch):
     assert values["X_OAUTH2_REFRESH_TOKEN"] == "new-refresh-token"
     assert values["X_OAUTH2_ACCESS_TOKEN_EXPIRES_AT"]
     assert "new-access-token" not in str(read_log_events())
+
+
+def test_x_connection_uses_oauth2_users_me():
+    calls = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append({"url": url, "params": params, "headers": headers, "timeout": timeout})
+        return FakeResponse({"data": {"id": "2065274277448835072", "username": "MSQUARED_2026"}}, url=url)
+
+    result = run_x_connection_test({
+        "oauth2_access_token": "test-token",
+        "http_get": fake_get,
+    })
+
+    assert result["ok"] is True
+    assert result["auth_mode"] == "oauth2_user"
+    assert result["checks"][0]["name"] == "authenticated_user"
+    assert calls[0]["url"] == "https://api.x.com/2/users/me"
+    assert calls[0]["headers"]["Authorization"] == "Bearer test-token"
+
+
+def test_x_connection_reports_401_guidance():
+    def fake_get(url, params=None, headers=None, timeout=None):
+        return FakeResponse(
+            {"title": "Unauthorized", "detail": "Invalid or expired token."},
+            status_code=401,
+            url=url,
+        )
+
+    result = run_x_connection_test({
+        "oauth2_access_token": "expired-token",
+        "http_get": fake_get,
+    })
+
+    assert result["ok"] is False
+    assert result["http_status"] == 401
+    assert "user-context token" in result["message"]
+    assert "Invalid or expired token" in result["provider_detail"]

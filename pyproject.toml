@@ -10,6 +10,7 @@ dependencies = [
     "streamlit",
     "tweepy>=4.0",
     "requests",
+    "tenacity",
 ]
 
 [tool.setuptools.packages.find]

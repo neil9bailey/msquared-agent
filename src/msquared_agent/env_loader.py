@@ -3,7 +3,19 @@ from pathlib import Path
 
 from .paths import app_root, source_root
 
-DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
+ALLOWED_OPENAI_MODELS = (
+    "gpt-5-nano",
+    "gpt-5-mini",
+    "gpt-5",
+    "gpt-5-pro",
+    "gpt-5.5",
+    "gpt-5.5-2026-04-23",
+    "gpt-5.5-pro",
+    "gpt-5.4-mini-2026-03-17",
+    "gpt-5.4-nano-2026-03-17",
+    "gpt-5.4-pro",
+)
+DEFAULT_OPENAI_MODEL = "gpt-5.4-mini-2026-03-17"
 
 ENV_KEYS = [
     "X_CLIENT_ID",

@@ -10,7 +10,7 @@ from msquared_agent.approval_queue import approve_item, list_queue, reject_item,
 from msquared_agent.app_log import APP_LOG_FILE, log_event, read_log_events
 from msquared_agent.audit_store import AUDIT_FILE, read_audit_records
 from msquared_agent.connector_config import connector_status, email_connector_config, x_connector_config
-from msquared_agent.env_loader import DEFAULT_OPENAI_MODEL, read_env_values, save_env_values
+from msquared_agent.env_loader import ALLOWED_OPENAI_MODELS, DEFAULT_OPENAI_MODEL, read_env_values, save_env_values
 from msquared_agent.email_adapter import fetch_inbound_emails, send_approved_email
 from msquared_agent.feedback_store import feedback_summary
 from msquared_agent.interactive_agent import agent_status, ask_agent, create_agent_draft, summarize_context
@@ -496,6 +496,8 @@ class MSquaredDesktopApp(tk.Tk):
         values.setdefault("EMAIL_WEBMAIL_URL", "https://webmail.porkbun.com/")
         values.setdefault("EMAIL_MAILBOX", "inbox")
         values.setdefault("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+        if values.get("OPENAI_MODEL") not in ALLOWED_OPENAI_MODELS:
+            values["OPENAI_MODEL"] = DEFAULT_OPENAI_MODEL
         values.setdefault("PRODUCT_KNOWLEDGE_ROOTS", r"F:\code\diiac\itservices.diiac.io;F:\code\M-Squared-Architecture")
         values.setdefault("ALLOW_OPENAI_TECHNICAL_CONTEXT", "false")
 
@@ -569,7 +571,7 @@ class MSquaredDesktopApp(tk.Tk):
         ai_frame.columnconfigure(1, weight=1)
         ai_frame.columnconfigure(3, weight=1)
         self._admin_entry(ai_frame, 0, "OpenAI API key", "OPENAI_API_KEY", values, secret=True)
-        self._admin_entry(ai_frame, 1, "Model", "OPENAI_MODEL", values)
+        self._admin_combo(ai_frame, 1, "Model", "OPENAI_MODEL", values, ALLOWED_OPENAI_MODELS)
         self._admin_entry(ai_frame, 2, "Knowledge roots", "PRODUCT_KNOWLEDGE_ROOTS", values)
         self._admin_combo(ai_frame, 3, "Send technical snippets to OpenAI", "ALLOW_OPENAI_TECHNICAL_CONTEXT", values, ("false", "true"))
         ai_hint = (
@@ -1541,6 +1543,8 @@ class MSquaredDesktopApp(tk.Tk):
         values.setdefault("EMAIL_WEBMAIL_URL", "https://webmail.porkbun.com/")
         values.setdefault("EMAIL_MAILBOX", "inbox")
         values.setdefault("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+        if values.get("OPENAI_MODEL") not in ALLOWED_OPENAI_MODELS:
+            values["OPENAI_MODEL"] = DEFAULT_OPENAI_MODEL
         values.setdefault("PRODUCT_KNOWLEDGE_ROOTS", r"F:\code\diiac\itservices.diiac.io;F:\code\M-Squared-Architecture")
         values.setdefault("ALLOW_OPENAI_TECHNICAL_CONTEXT", "false")
         for key, var in self.admin_vars.items():

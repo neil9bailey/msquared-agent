@@ -10,6 +10,7 @@ from .feedback_store import similar_approved_examples
 from .paths import resource_path
 from .product_knowledge import format_knowledge_context, search_product_knowledge
 from .risk_classifier import classify_email
+from .text_hygiene import display_excerpt, product_excerpt
 
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -172,7 +173,7 @@ def summarize_context(context: dict | None) -> str:
     subject = item.get("subject", "")
     author = item.get("from") or item.get("author") or item.get("to") or ""
     text = item.get("text") or item.get("body") or item.get("draft") or ""
-    preview = _truncate(text.replace("\n", " "), 180)
+    preview = product_excerpt(text, 180) if channel == "x" else display_excerpt(text, 180)
 
     parts = [f"{kind}: {item.get('id', 'unsaved')}"]
     if channel:

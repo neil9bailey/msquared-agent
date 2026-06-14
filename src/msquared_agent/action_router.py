@@ -1,3 +1,6 @@
+from .text_hygiene import contains_non_latin_text, product_excerpt
+
+
 def detect_action_for_intake(item: dict | None) -> dict:
     item = item or {}
     channel = item.get("channel") or ""
@@ -75,7 +78,9 @@ def action_summary(item: dict | None, draft: dict | None = None) -> str:
     if item:
         subject = item.get("subject") or item.get("text") or ""
         if subject:
-            parts.append(f"Summary: {_truncate(subject.replace(chr(10), ' '), 180)}")
+            parts.append(f"Summary: {product_excerpt(subject, 220)}")
+            if contains_non_latin_text(subject):
+                parts.append("Note: mixed non-Latin text was omitted from this summary; the raw intake text is preserved.")
     if draft:
         parts.extend([
             f"Draft: {draft.get('id')}",
@@ -83,7 +88,3 @@ def action_summary(item: dict | None, draft: dict | None = None) -> str:
             f"Pipeline: {draft.get('pipeline_state', 'draft_ready')}",
         ])
     return "\n".join(parts)
-
-
-def _truncate(value: str, limit: int) -> str:
-    return value if len(value) <= limit else value[: limit - 3].rstrip() + "..."

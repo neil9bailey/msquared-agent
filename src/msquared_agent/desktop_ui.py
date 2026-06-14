@@ -20,6 +20,7 @@ from msquared_agent.paths import app_root
 from msquared_agent.product_knowledge import build_product_knowledge_index, build_validation_packet, knowledge_status
 from msquared_agent.risk_classifier import classify_action
 from msquared_agent.settings import DEFAULT_FEATURE_FLAGS, load_feature_flags, save_feature_flags
+from msquared_agent.text_hygiene import display_excerpt, product_excerpt
 from msquared_agent.x_adapter import fetch_x_feed, post_approved_tweet, test_x_connection
 
 
@@ -1120,6 +1121,7 @@ class MSquaredDesktopApp(tk.Tk):
         self.intake_table.delete(*self.intake_table.get_children())
         for item in self.intake_items:
             subject = item.get("subject") or item.get("text", "")
+            preview = product_excerpt(subject, 80) if item.get("channel") == "x" else display_excerpt(subject, 80)
             self.intake_table.insert(
                 "",
                 tk.END,
@@ -1129,7 +1131,7 @@ class MSquaredDesktopApp(tk.Tk):
                     item.get("channel", ""),
                     item.get("source_type", ""),
                     item.get("from") or item.get("author", ""),
-                    subject[:80],
+                    preview,
                     item.get("status", ""),
                 ),
             )

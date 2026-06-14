@@ -51,16 +51,29 @@ For a private local-only build that includes your existing `dist\.env` credentia
 
 The default command excludes `.env`; use the override only for your own machine/private zip.
 
+## Operator Console (Updated Workflow)
+The interface now follows a clear governed pipeline:
+
+Intake - X mentions, search results, emails
+Action Center - Select item -> Generate Draft
+Draft Review - Raw MSquared draft + Legal review + Final version
+Approval - Human review & edit
+Preflight - Safety checks
+Execute - Post / Send (with confirmation)
+
+Manual drafting is available in an Advanced section for original posts.
+
 ## Operator workflow
 1. Open the desktop console.
 2. Use **Monitor** to refresh X/email intake or paste a manual X/email item.
 3. Filter intake by status and channel when you need only X or email messages.
-4. Use **Agent** to ask MSquared about selected intake/drafts, summarize context, or create an approval draft.
-5. Select an intake item and draft an X reply, X post, or email response.
-6. Use **Approval** to approve or reject drafts.
-7. Use **Prepare Payload** to inspect the approved X/email request.
-8. Use **Post/Send** only after reviewing the prepared payload. Live posting/sending requires connector readiness and a typed confirmation.
-9. Use **Diagnostics** to see app logs, audit records, connector readiness, and runtime file paths.
+4. Select an intake item. The Agent tab **Action Center** shows the canonical intake ID, detected action, recommended next step, selected draft, and pipeline state.
+5. Use **Generate Draft** to create a raw MSquared draft. The raw draft is preserved separately from Legal and final versions.
+6. Use **Run Legal Review**. The Legal Agent only recommends or applies wording changes for clear legal, compliance, claim-boundary, or private-material issues.
+7. Use **Edit Final** in Approval if the operator needs to adjust the final version before approval.
+8. Use **Approve**, then **Preflight** / **Preflight Payload** to run final safety and payload checks.
+9. Use **Execute** or **Post/Send** only after reviewing the preflight payload. Live posting/sending requires connector readiness and a typed confirmation.
+10. Use **Diagnostics** to see app logs, audit records, connector readiness, pipeline counts, knowledge status, governed-learning counts, and runtime file paths.
 
 ## Admin settings
 Open **Settings -> Admin** in the desktop console to enter X API credentials, email IMAP/SMTP credentials, monitor settings, and feature flags. Click **Save Admin Settings** to persist them beside the exe:
@@ -79,7 +92,11 @@ The **AI Agent** fields are optional. Without `OPENAI_API_KEY`, the Agent tab us
 
 The Agent product context is packaged in `prompts\MSQUARED_PRODUCT_CONTEXT.md`. It combines DIIaC IT Enterprise / IT Services and M2 product knowledge, including the split between DIIaC as governed decision assurance infrastructure and M2 as the advisory interpretability/evaluation layer.
 
-The Agent tab also has a local product knowledge index for detailed technical questions. Click **Refresh Product Knowledge** to scan the configured local repos in `PRODUCT_KNOWLEDGE_ROOTS`. Public posts and email drafts use public-safe context only. Internal technical snippets stay local in `technical_local` mode; `technical_openai` only sends selected internal snippets to OpenAI when `ALLOW_OPENAI_TECHNICAL_CONTEXT=true`.
+The Agent tab also has a local product knowledge index for detailed technical questions. Click **Update Knowledge Library** to scan the configured local repos in `PRODUCT_KNOWLEDGE_ROOTS`. Public posts and email drafts use public-safe context only. Internal technical snippets stay local in `technical_local` mode; `technical_openai` only sends selected internal snippets to OpenAI when `ALLOW_OPENAI_TECHNICAL_CONTEXT=true`.
+
+The Knowledge Library status card shows last updated time, indexed document count, and public-safe vs internal source counts. Every generated draft can show **Knowledge Used**, including source titles, paths, sensitivity, confidence scores, and similar locally approved examples used for style guidance.
+
+Governed learning is local and append-only in `data\agent_feedback.jsonl`. Approval and rejection events capture intake ID, draft ID, outcome, reason tags, final text, legal review result, and any human edit diff. Draft generation retrieves top similar approved local examples as style/context guidance without sending the feedback store anywhere.
 
 Use **Copy Validation Packet** to copy the current question and retrieved source excerpts for review in Codex/Coding Chat.
 
@@ -149,7 +166,9 @@ Open **Diagnostics** in the desktop console to inspect:
 
 - `data\app.log.jsonl` for operator-visible app events.
 - `data\audit.log.jsonl` for approval and final-action records.
+- `data\agent_feedback.jsonl` for governed local approval/rejection learning.
 - Connector readiness and runtime paths.
+- Pipeline status per intake/draft stage, Knowledge Library status, and governed-learning summary.
 
 Logs are redacted before writing and reading. Secret-looking values and large content fields are omitted or hashed.
 

@@ -628,7 +628,7 @@ def prepare_x_payload(item_id: str) -> dict:
         raise PermissionError("Blocked X items cannot be prepared.")
 
     payload = {"text": item["draft"]}
-    reply_to = item.get("reply_to") or item.get("source", {}).get("source_id")
+    reply_to = item.get("reply_to") or item.get("external_source_id") or item.get("source", {}).get("source_id")
     if item.get("type") == "x_reply":
         if not reply_to:
             raise ValueError("X replies require a supplied mention/reply source id.")

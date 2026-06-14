@@ -6,6 +6,7 @@ import requests
 from .agent import generate_draft
 from .app_log import log_event
 from .env_loader import DEFAULT_OPENAI_MODEL, env_bool, get_env, load_env_file, mask_secret
+from .feedback_store import similar_approved_examples
 from .paths import resource_path
 from .product_knowledge import format_knowledge_context, search_product_knowledge
 from .risk_classifier import classify_email
@@ -106,9 +107,11 @@ def create_agent_draft(content_type: str, prompt: str, context: dict | None = No
     model = get_env("OPENAI_MODEL") or DEFAULT_MODEL
     mode = "local"
     openai_error = None
+    public_results = search_product_knowledge(prompt, mode="public_safe", limit=5)
+    similar_examples = similar_approved_examples(prompt, action_type=content_type, limit=3)
+    draft_context["knowledge_results"] = public_results
+    draft_context["similar_examples"] = similar_examples
     if api_key:
-        public_results = search_product_knowledge(prompt, mode="public_safe", limit=5)
-        draft_context["knowledge_results"] = public_results
         try:
             draft_context["draft_override"] = _draft_with_openai(content_type, prompt, draft_context, api_key, model)
             draft_context["agent_mode"] = "openai"
@@ -150,6 +153,7 @@ def create_agent_draft(content_type: str, prompt: str, context: dict | None = No
             "prompt": prompt,
             "context": _context_digest(context),
             "knowledge_sources": _knowledge_source_digest(draft_context.get("knowledge_results", [])),
+            "similar_example_count": len(draft_context.get("similar_examples", [])),
         },
     )
     return item
@@ -227,6 +231,7 @@ def _draft_with_openai(content_type: str, prompt: str, context: dict, api_key: s
         f"Format rules: {format_rules}\n\n"
         f"Selected operator context:\n{_render_context(context)}\n\n"
         f"Public-safe product knowledge:\n{_render_knowledge_context(context, public_only=True)}\n\n"
+        f"Similar approved examples for local style guidance:\n{_render_similar_examples(context)}\n\n"
         f"Operator drafting instruction:\n{prompt}\n\n"
         "Return only the draft text. Do not explain your reasoning."
     )
@@ -340,7 +345,7 @@ def _local_agent_answer(prompt: str, context: dict) -> str:
     if "risk" in lower_prompt or "guardrail" in lower_prompt or "approve" in lower_prompt:
         return (
             "Governance check: keep this draft useful before promotional, avoid compliance-certification language, "
-            "avoid truth/proof claims for M², and do not imply MSquared can approve decisions. "
+            "avoid truth/proof claims for M2, and do not imply MSquared can approve decisions. "
             "Use the approval queue before any post or send action.\n\n"
             f"{knowledge_note}"
         )
@@ -419,6 +424,20 @@ def _render_knowledge_context(context: dict, public_only: bool = False) -> str:
     results = context.get("knowledge_results", [])
     include_internal = not public_only and context.get("knowledge_mode") == "technical_openai"
     return format_knowledge_context(results, include_internal=include_internal)
+
+
+def _render_similar_examples(context: dict) -> str:
+    examples = context.get("similar_examples", [])
+    if not examples:
+        return "No approved local examples matched this request."
+    lines = []
+    for index, example in enumerate(examples, start=1):
+        text = _truncate(example.get("final_text", "").replace("\n", " "), 700)
+        lines.append(
+            f"[{index}] {example.get('action_type')} | draft={example.get('draft_id')} | "
+            f"intake={example.get('intake_id')} | score={example.get('score')}: {text}"
+        )
+    return "\n".join(lines)
 
 
 def _local_knowledge_answer(prompt: str, results: list[dict]) -> str:

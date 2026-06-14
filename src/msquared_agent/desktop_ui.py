@@ -1,21 +1,26 @@
+import difflib
 import json
 import threading
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
-from msquared_agent.agent import generate_draft
-from msquared_agent.approval_queue import approve_item, list_queue, reject_item
+from msquared_agent.action_preflight import run_action_preflight
+from msquared_agent.action_router import action_summary, detect_action_for_intake
+from msquared_agent.approval_queue import approve_item, list_queue, reject_item, update_approval_item
 from msquared_agent.app_log import APP_LOG_FILE, log_event, read_log_events
 from msquared_agent.audit_store import AUDIT_FILE, read_audit_records
 from msquared_agent.connector_config import connector_status, email_connector_config, x_connector_config
 from msquared_agent.env_loader import DEFAULT_OPENAI_MODEL, read_env_values, save_env_values
-from msquared_agent.email_adapter import fetch_inbound_emails, prepare_email_payload, send_approved_email
+from msquared_agent.email_adapter import fetch_inbound_emails, send_approved_email
+from msquared_agent.feedback_store import feedback_summary
 from msquared_agent.interactive_agent import agent_status, ask_agent, create_agent_draft, summarize_context
 from msquared_agent.intake_store import add_intake_item, list_intake, update_intake_status
+from msquared_agent.legal_agent import review_approval_item
 from msquared_agent.paths import app_root
 from msquared_agent.product_knowledge import build_product_knowledge_index, build_validation_packet, knowledge_status
+from msquared_agent.risk_classifier import classify_action
 from msquared_agent.settings import DEFAULT_FEATURE_FLAGS, load_feature_flags, save_feature_flags
-from msquared_agent.x_adapter import fetch_x_feed, post_approved_tweet, prepare_x_payload, test_x_connection
+from msquared_agent.x_adapter import fetch_x_feed, post_approved_tweet, test_x_connection
 
 
 class MSquaredDesktopApp(tk.Tk):
@@ -44,6 +49,7 @@ class MSquaredDesktopApp(tk.Tk):
         self.admin_flag_vars = {}
         self.secret_entries = []
         self.show_secrets = tk.BooleanVar(value=False)
+        self.show_knowledge_used = tk.BooleanVar(value=False)
         self.prepared_payload_item_id = None
         self.agent_messages = []
         self.agent_busy = False
@@ -176,7 +182,7 @@ class MSquaredDesktopApp(tk.Tk):
         columns = ("id", "channel", "source", "from", "subject", "status")
         self.intake_table = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
         headings = {"id": "ID", "channel": "Channel", "source": "Source", "from": "From", "subject": "Subject/Text", "status": "Status"}
-        widths = {"id": 70, "channel": 75, "source": 120, "from": 140, "subject": 320, "status": 80}
+        widths = {"id": 155, "channel": 75, "source": 120, "from": 140, "subject": 320, "status": 80}
         for column in columns:
             self.intake_table.heading(column, text=headings[column])
             self.intake_table.column(column, width=widths[column], minwidth=60, stretch=column == "subject")
@@ -264,7 +270,7 @@ class MSquaredDesktopApp(tk.Tk):
         side.grid(row=1, column=1, sticky="nsew")
         side.columnconfigure(0, weight=1)
         side.rowconfigure(2, weight=1)
-        ttk.Label(side, text="Selected Context", style="Panel.TLabel", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(side, text="Action Center", style="Panel.TLabel", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
         context_controls = ttk.Frame(side, style="Panel.TFrame")
         context_controls.grid(row=1, column=0, sticky="ew", pady=(8, 6))
         ttk.Label(context_controls, text="Use", style="Panel.TLabel").pack(side=tk.LEFT)
@@ -278,11 +284,43 @@ class MSquaredDesktopApp(tk.Tk):
         context_picker.pack(side=tk.LEFT, padx=(8, 0))
         context_picker.bind("<<ComboboxSelected>>", lambda _event: self.refresh_agent_context())
 
-        self.agent_context_box = tk.Text(side, height=8, wrap=tk.WORD, font=("Segoe UI", 9), state=tk.DISABLED)
+        self.agent_context_box = tk.Text(side, height=10, wrap=tk.WORD, font=("Segoe UI", 9), state=tk.DISABLED)
         self.agent_context_box.grid(row=2, column=0, sticky="nsew")
 
-        draft_box = ttk.LabelFrame(side, text="Create Draft", padding=10)
-        draft_box.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        action_buttons = ttk.Frame(side, style="Panel.TFrame")
+        action_buttons.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self.generate_action_draft_button = ttk.Button(
+            action_buttons,
+            text="Generate Draft",
+            style="Accent.TButton",
+            command=self.generate_action_center_draft,
+        )
+        self.generate_action_draft_button.pack(side=tk.LEFT)
+        self.legal_review_button = ttk.Button(action_buttons, text="Run Legal Review", command=self.run_action_center_legal_review)
+        self.legal_review_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.action_approve_button = ttk.Button(action_buttons, text="Approve", command=self.approve_selected)
+        self.action_approve_button.pack(side=tk.LEFT, padx=(6, 0))
+
+        action_buttons_2 = ttk.Frame(side, style="Panel.TFrame")
+        action_buttons_2.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        self.preflight_button = ttk.Button(action_buttons_2, text="Preflight", command=self.run_action_center_preflight)
+        self.preflight_button.pack(side=tk.LEFT)
+        self.action_execute_button = ttk.Button(action_buttons_2, text="Execute", command=self.execute_selected_action)
+        self.action_execute_button.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Checkbutton(
+            action_buttons_2,
+            text="Knowledge Used",
+            variable=self.show_knowledge_used,
+            command=self.toggle_knowledge_used_visibility,
+        ).pack(side=tk.RIGHT)
+
+        self.knowledge_used_frame = ttk.Frame(side, style="Panel.TFrame")
+        self.knowledge_used_frame.columnconfigure(0, weight=1)
+        self.knowledge_used_box = tk.Text(self.knowledge_used_frame, height=7, wrap=tk.WORD, font=("Segoe UI", 9), state=tk.DISABLED)
+        self.knowledge_used_box.grid(row=0, column=0, sticky="ew")
+
+        draft_box = ttk.LabelFrame(side, text="Advanced Manual Draft", padding=10)
+        draft_box.grid(row=6, column=0, sticky="ew", pady=(10, 0))
         draft_box.columnconfigure(1, weight=1)
         ttk.Label(draft_box, text="Type").grid(row=0, column=0, sticky="w")
         ttk.Combobox(
@@ -294,8 +332,8 @@ class MSquaredDesktopApp(tk.Tk):
         ).grid(row=0, column=1, sticky="ew", padx=(8, 0))
         ttk.Button(draft_box, text="Create Approval Draft", command=self.create_agent_draft_from_prompt).grid(row=1, column=1, sticky="e", pady=(8, 0))
 
-        knowledge_box = ttk.LabelFrame(side, text="Product Knowledge", padding=10)
-        knowledge_box.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        knowledge_box = ttk.LabelFrame(side, text="Knowledge Library", padding=10)
+        knowledge_box.grid(row=7, column=0, sticky="ew", pady=(10, 0))
         knowledge_box.columnconfigure(1, weight=1)
         ttk.Label(knowledge_box, text="Mode").grid(row=0, column=0, sticky="w")
         knowledge_picker = ttk.Combobox(
@@ -310,7 +348,7 @@ class MSquaredDesktopApp(tk.Tk):
         self.knowledge_status_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         knowledge_actions = ttk.Frame(knowledge_box)
         knowledge_actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        self.refresh_knowledge_button = ttk.Button(knowledge_actions, text="Refresh Product Knowledge", command=self.refresh_product_knowledge_async)
+        self.refresh_knowledge_button = ttk.Button(knowledge_actions, text="Update Knowledge Library", command=self.refresh_product_knowledge_async)
         self.refresh_knowledge_button.pack(side=tk.LEFT)
         ttk.Button(knowledge_actions, text="Copy Validation Packet", command=self.copy_validation_packet).pack(side=tk.LEFT, padx=(8, 0))
 
@@ -374,10 +412,10 @@ class MSquaredDesktopApp(tk.Tk):
         table_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
         table_frame.columnconfigure(0, weight=1)
         table_frame.rowconfigure(0, weight=1)
-        columns = ("id", "channel", "type", "risk", "status", "created")
+        columns = ("id", "channel", "type", "risk", "status", "pipeline", "created")
         self.queue_table = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
-        headings = {"id": "ID", "channel": "Channel", "type": "Type", "risk": "Risk", "status": "Status", "created": "Created"}
-        widths = {"id": 76, "channel": 74, "type": 110, "risk": 70, "status": 110, "created": 150}
+        headings = {"id": "ID", "channel": "Channel", "type": "Type", "risk": "Risk", "status": "Status", "pipeline": "Pipeline", "created": "Created"}
+        widths = {"id": 76, "channel": 74, "type": 110, "risk": 70, "status": 100, "pipeline": 150, "created": 150}
         for column in columns:
             self.queue_table.heading(column, text=headings[column])
             self.queue_table.column(column, width=widths[column], minwidth=60, stretch=column == "created")
@@ -406,7 +444,9 @@ class MSquaredDesktopApp(tk.Tk):
         self.approve_button.pack(side=tk.LEFT)
         self.reject_button = ttk.Button(buttons, text="Reject", command=self.reject_selected, state=tk.DISABLED)
         self.reject_button.pack(side=tk.LEFT, padx=(6, 0))
-        self.prepare_button = ttk.Button(buttons, text="Prepare Payload", command=self.prepare_selected_payload, state=tk.DISABLED)
+        self.edit_final_button = ttk.Button(buttons, text="Edit Final", command=self.edit_selected_final_draft, state=tk.DISABLED)
+        self.edit_final_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.prepare_button = ttk.Button(buttons, text="Preflight Payload", command=self.prepare_selected_payload, state=tk.DISABLED)
         self.prepare_button.pack(side=tk.LEFT, padx=(6, 0))
         self.post_send_button = ttk.Button(buttons, text="Post/Send", command=self.execute_selected_action, state=tk.DISABLED)
         self.post_send_button.pack(side=tk.LEFT, padx=(6, 0))
@@ -697,7 +737,109 @@ class MSquaredDesktopApp(tk.Tk):
             return
         self._update_agent_status_label()
         self._update_knowledge_status_label()
-        self._set_text(self.agent_context_box, summarize_context(self._current_agent_context()))
+        intake, draft = self._action_center_items()
+        summary = action_summary(intake, draft)
+        if not intake and not draft:
+            summary = summarize_context(self._current_agent_context())
+        self._set_text(self.agent_context_box, summary)
+        self._update_knowledge_used_box(draft)
+        self._update_action_center_buttons()
+
+    def _action_center_items(self):
+        source = self.agent_context_source.get()
+        intake = self._selected_intake() if source in {"auto", "selected_intake"} else None
+        draft = self._selected_queue_item() if source in {"auto", "selected_draft"} else None
+        return intake, draft
+
+    def _update_action_center_buttons(self):
+        button_names = (
+            "generate_action_draft_button",
+            "legal_review_button",
+            "action_approve_button",
+            "preflight_button",
+            "action_execute_button",
+        )
+        if not all(hasattr(self, name) for name in button_names):
+            return
+        intake, draft = self._action_center_items()
+        action = detect_action_for_intake(intake)
+        can_generate = bool(intake and action.get("action_type") in {"x_post", "x_reply", "email_response"})
+        can_review = bool(draft and draft.get("status") in {"drafted", "needs_review"})
+        can_approve = can_review and draft.get("risk_level") != "block"
+        can_preflight = bool(draft and draft.get("status") == "approved" and draft.get("risk_level") != "block")
+        can_execute = can_preflight and self.prepared_payload_item_id == draft.get("id")
+        self.generate_action_draft_button.configure(state=tk.NORMAL if can_generate else tk.DISABLED)
+        self.legal_review_button.configure(state=tk.NORMAL if can_review else tk.DISABLED)
+        self.action_approve_button.configure(state=tk.NORMAL if can_approve else tk.DISABLED)
+        self.preflight_button.configure(state=tk.NORMAL if can_preflight else tk.DISABLED)
+        self.action_execute_button.configure(state=tk.NORMAL if can_execute else tk.DISABLED)
+
+    def toggle_knowledge_used_visibility(self):
+        if not hasattr(self, "knowledge_used_frame"):
+            return
+        if self.show_knowledge_used.get():
+            self.knowledge_used_frame.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        else:
+            self.knowledge_used_frame.grid_remove()
+        self.refresh_agent_context()
+
+    def _update_knowledge_used_box(self, item: dict | None):
+        if not hasattr(self, "knowledge_used_box"):
+            return
+        self._set_text(self.knowledge_used_box, self._format_knowledge_used(item))
+
+    def _format_knowledge_used(self, item: dict | None) -> str:
+        if not item:
+            return "No draft selected. Generate or select a draft to see sources."
+        knowledge = item.get("knowledge_used") or (item.get("context") or {}).get("knowledge_results") or []
+        examples = item.get("similar_examples_used") or (item.get("context") or {}).get("similar_examples") or []
+        lines = [f"Draft {item.get('id')} | pipeline {item.get('pipeline_state', 'draft_ready')}"]
+        if knowledge:
+            lines.append("")
+            lines.append("Product knowledge sources:")
+            for index, source in enumerate(knowledge[:8], start=1):
+                lines.append(
+                    f"{index}. {source.get('product')} | {source.get('title')} | "
+                    f"{source.get('relative_path')} | {source.get('sensitivity')} | confidence {source.get('score', 'n/a')}"
+                )
+        else:
+            lines.append("")
+            lines.append("No product knowledge sources were attached to this draft.")
+        if examples:
+            lines.append("")
+            lines.append("Similar approved local examples:")
+            for index, example in enumerate(examples[:5], start=1):
+                lines.append(
+                    f"{index}. {example.get('action_type')} | draft {example.get('draft_id')} | "
+                    f"intake {example.get('intake_id')} | confidence {example.get('score', 'n/a')}"
+                )
+        legal = item.get("legal_review") or {}
+        if legal:
+            lines.append("")
+            lines.append(f"Legal review: {legal.get('decision')} | {legal.get('rationale')}")
+        return "\n".join(lines)
+
+    def _format_draft_review(self, item: dict) -> str:
+        raw = item.get("raw_agent_draft") or item.get("draft") or ""
+        legal = item.get("legal_revised_draft") or ""
+        final = item.get("final_draft") or item.get("draft") or ""
+        review = item.get("legal_review") or {}
+        sections = [
+            "RAW MSquared Agent Draft",
+            raw,
+            "",
+        ]
+        if legal:
+            sections.extend(["LEGAL AGENT REVISION", legal, ""])
+        sections.extend(["FINAL VERSION FOR APPROVAL", final])
+        if review:
+            sections.extend([
+                "",
+                "LEGAL REVIEW",
+                f"Decision: {review.get('decision', '')}",
+                f"Rationale: {review.get('rationale', '')}",
+            ])
+        return "\n".join(sections).strip()
 
     def _append_agent_message(self, role: str, text: str):
         if not hasattr(self, "agent_transcript"):
@@ -765,9 +907,9 @@ class MSquaredDesktopApp(tk.Tk):
         built_at = status.get("built_at") or "not built"
         counts = status.get("sensitivity_counts", {})
         text = (
-            f"Index: {status.get('document_count', 0)} chunks | "
-            f"public {counts.get('public_safe', 0)} / internal {counts.get('internal', 0)} | "
-            f"built {built_at}"
+            f"Last updated: {built_at}\n"
+            f"Documents indexed: {status.get('document_count', 0)}\n"
+            f"Public-safe: {counts.get('public_safe', 0)} | Internal: {counts.get('internal', 0)}"
         )
         self.knowledge_status_label.configure(text=text)
 
@@ -811,6 +953,113 @@ class MSquaredDesktopApp(tk.Tk):
         self.status_text.set("Validation packet copied for Coding Chat.")
         self.refresh_diagnostics()
 
+    def generate_action_center_draft(self):
+        intake, _draft = self._action_center_items()
+        if not intake:
+            messagebox.showinfo("Select intake", "Select an X or email intake item first.")
+            return
+        action = detect_action_for_intake(intake)
+        content_type = action.get("action_type")
+        if content_type not in {"x_post", "x_reply", "email_response"}:
+            messagebox.showinfo("Manual review needed", action.get("recommended_next_step", "Review this item manually first."))
+            return
+
+        body = intake.get("text") or intake.get("body") or ""
+        subject = intake.get("subject") or ""
+        prompt = self.agent_prompt.get("1.0", tk.END).strip()
+        draft_input = prompt or "\n\n".join(part for part in (subject, body) if part).strip()
+        if not draft_input:
+            draft_input = action_summary(intake)
+
+        context = {
+            "source": intake,
+            "action": action,
+            "knowledge_mode": self.agent_knowledge_mode.get(),
+        }
+        try:
+            item = create_agent_draft(content_type, draft_input, context)
+        except Exception as exc:
+            log_event("action_center_draft_failed", "error", "Action Center draft generation failed.", {"error": str(exc), "intake_id": intake.get("id"), "action_type": content_type})
+            messagebox.showerror("Generate draft failed", str(exc))
+            self.status_text.set("Action Center draft failed. See Diagnostics.")
+            self.refresh_diagnostics()
+            return
+
+        update_intake_status(intake["id"], "drafted")
+        self.queue_filter.set("all")
+        self.selected_item_id = item["id"]
+        fallback_error = (item.get("context") or {}).get("agent_openai_error")
+        log_event(
+            "action_center_draft_created",
+            "info",
+            "Action Center generated a governed draft.",
+            {
+                "intake_id": intake.get("id"),
+                "canonical_id": intake.get("canonical_id"),
+                "approval_item_id": item.get("id"),
+                "action_type": content_type,
+                "risk_level": item.get("risk_level"),
+                "knowledge_source_count": len(item.get("knowledge_used", [])),
+                "similar_example_count": len(item.get("similar_examples_used", [])),
+            },
+        )
+        message = f"Generated draft {item['id']} for {intake.get('canonical_id') or intake.get('id')} ({action.get('label')})."
+        if fallback_error:
+            message += f"\nOpenAI fallback used: {fallback_error}"
+        self._append_agent_message("MSquared", message)
+        self.status_text.set(f"Action Center generated draft {item['id']}. Review raw/legal/final before approval.")
+        self.refresh_intake(select_item_id=intake["id"])
+        self.refresh_queue(select_item_id=item["id"])
+        self.refresh_agent_context()
+        self.refresh_diagnostics()
+
+    def run_action_center_legal_review(self):
+        item = self._selected_queue_item()
+        if not item:
+            messagebox.showinfo("Select draft", "Select a draft item first.")
+            return
+        try:
+            updated = review_approval_item(item["id"])
+        except Exception as exc:
+            log_event("legal_review_ui_failed", "error", "Legal review failed in Action Center.", {"approval_item_id": item.get("id"), "error": str(exc)})
+            messagebox.showerror("Legal review failed", str(exc))
+            self.status_text.set("Legal review failed. See Diagnostics.")
+            self.refresh_diagnostics()
+            return
+        review = updated.get("legal_review") or {}
+        decision = review.get("decision", "unknown")
+        changed = "changed" if review.get("changed") else "no change"
+        self._append_agent_message("Legal", f"Review for {item['id']}: {decision} ({changed}). {review.get('rationale', '')}")
+        self.status_text.set(f"Legal review completed for {item['id']}: {decision}.")
+        self.refresh_queue(select_item_id=item["id"])
+        self.refresh_agent_context()
+        self.refresh_diagnostics()
+
+    def run_action_center_preflight(self):
+        item = self._selected_queue_item()
+        if not item:
+            messagebox.showinfo("Select draft", "Select an approved draft first.")
+            return
+        try:
+            result = run_action_preflight(item["id"])
+        except Exception as exc:
+            log_event("action_preflight_ui_failed", "error", "Action Center preflight failed.", {"approval_item_id": item.get("id"), "error": str(exc)})
+            messagebox.showerror("Preflight failed", str(exc))
+            self.status_text.set("Preflight failed. See Diagnostics.")
+            self.refresh_diagnostics()
+            return
+        if result.get("decision") == "pass":
+            self.prepared_payload_item_id = item["id"]
+            self.status_text.set(f"Preflight passed for {item['id']}. Execute still requires final confirmation.")
+        else:
+            self.prepared_payload_item_id = None
+            messagebox.showwarning("Preflight blocked", result.get("message", "Preflight blocked this action."))
+            self.status_text.set(f"Preflight blocked for {item['id']}.")
+        self.refresh_queue(select_item_id=item["id"])
+        self._set_text(self.payload_preview, json.dumps(result.get("payload") or result, indent=2, default=str))
+        self.refresh_agent_context()
+        self.refresh_diagnostics()
+
     def create_agent_draft_from_prompt(self):
         content_type = self.agent_draft_type.get()
         prompt = self.agent_prompt.get("1.0", tk.END).strip()
@@ -832,7 +1081,8 @@ class MSquaredDesktopApp(tk.Tk):
             messagebox.showinfo("Input needed", "Add a prompt or select an intake item first.")
             return
 
-        draft_context = {"source": source} if source else context
+        draft_context = {"source": source} if source else dict(context)
+        draft_context["knowledge_mode"] = self.agent_knowledge_mode.get()
         try:
             item = create_agent_draft(content_type, draft_input, draft_context)
         except Exception as exc:
@@ -851,6 +1101,7 @@ class MSquaredDesktopApp(tk.Tk):
         else:
             self.status_text.set(f"Agent created draft {item['id']} for approval.")
         self._append_agent_message("MSquared", message)
+        self.queue_filter.set("all")
         self.tabs.select(self.approval_tab)
         self.refresh_queue(select_item_id=item["id"])
         self.refresh_agent_context()
@@ -868,7 +1119,7 @@ class MSquaredDesktopApp(tk.Tk):
                 tk.END,
                 iid=item["id"],
                 values=(
-                    item.get("id", ""),
+                    item.get("canonical_id") or item.get("id", ""),
                     item.get("channel", ""),
                     item.get("source_type", ""),
                     item.get("from") or item.get("author", ""),
@@ -899,7 +1150,12 @@ class MSquaredDesktopApp(tk.Tk):
         item = self._selected_intake()
         if not item:
             return
-        meta = f"{item.get('channel')} / {item.get('source_type')} / {item.get('from') or item.get('author') or 'unknown'}"
+        meta = (
+            f"{item.get('canonical_id') or item.get('id')} | {item.get('channel')} / {item.get('source_type')} / "
+            f"{item.get('from') or item.get('author') or 'unknown'}"
+        )
+        if item.get("source_id"):
+            meta += f" | source id {item.get('source_id')}"
         self.intake_meta.configure(text=meta)
         detail = item.get("text") or item.get("body") or ""
         if item.get("subject"):
@@ -918,11 +1174,13 @@ class MSquaredDesktopApp(tk.Tk):
         if draft_type.startswith("email") and item.get("channel") != "email":
             messagebox.showinfo("Wrong channel", "Select an email intake item for email drafts.")
             return
-        draft = generate_draft(draft_type, item.get("text", ""), {"source": item})
+        draft_input = "\n\n".join(part for part in (item.get("subject", ""), item.get("text", "") or item.get("body", "")) if part).strip()
+        draft = create_agent_draft(draft_type, draft_input, {"source": item, "action": detect_action_for_intake(item)})
         update_intake_status(item["id"], "drafted")
         log_event("draft_created_from_intake", "info", "Draft created from intake item.", {"intake_id": item["id"], "approval_item_id": draft["id"], "draft_type": draft_type, "risk_level": draft["risk_level"]})
         self.status_text.set(f"Created {draft_type} draft {draft['id']} from {item['id']} with {draft['risk_level']} risk.")
         self.refresh_intake(select_item_id=item["id"])
+        self.queue_filter.set("all")
         self.tabs.select(self.approval_tab)
         self.refresh_queue(select_item_id=draft["id"])
         self.refresh_diagnostics()
@@ -941,9 +1199,10 @@ class MSquaredDesktopApp(tk.Tk):
         if not text:
             messagebox.showinfo("Input needed", "Add context before generating a draft.")
             return
-        item = generate_draft(self.composer_type.get(), text)
+        item = create_agent_draft(self.composer_type.get(), text, {"source_type": "manual_original_post"})
         log_event("composer_draft_created", "info", "Composer draft created.", {"approval_item_id": item["id"], "type": item["type"], "risk_level": item["risk_level"]})
         self.status_text.set(f"Draft {item['id']} added with {item['risk_level']} risk.")
+        self.queue_filter.set("all")
         self.tabs.select(self.approval_tab)
         self.refresh_queue(select_item_id=item["id"])
         self.refresh_diagnostics()
@@ -968,6 +1227,7 @@ class MSquaredDesktopApp(tk.Tk):
                     item.get("type", ""),
                     item.get("risk_level", ""),
                     item.get("status", ""),
+                    item.get("pipeline_state", ""),
                     created[:19].replace("T", " "),
                 ),
             )
@@ -996,14 +1256,21 @@ class MSquaredDesktopApp(tk.Tk):
         item = self._selected_queue_item()
         if not item:
             return
-        self.prepared_payload_item_id = None
-        self._set_text(self.draft_preview, item.get("draft", ""))
-        self._set_text(self.payload_preview, "")
+        prepared_for_selected = self.prepared_payload_item_id == item.get("id")
+        if not prepared_for_selected:
+            self.prepared_payload_item_id = None
+        self._set_text(self.draft_preview, self._format_draft_review(item))
+        if not prepared_for_selected:
+            self._set_text(self.payload_preview, "")
         risks = item.get("risks") or []
         claims = item.get("claims_checked") or []
         risk_detail = "; ".join(str(risk) for risk in risks[:3]) if risks else "none"
         self.risk_label.configure(
-            text=f"Risk: {item.get('risk_level')} | Status: {item.get('status')} | Reasons: {risk_detail} | Claims checked: {len(claims)}"
+            text=(
+                f"Risk: {item.get('risk_level')} | Status: {item.get('status')} | "
+                f"Pipeline: {item.get('pipeline_state', 'draft_ready')} | Source: {item.get('source_intake_id', '')} | "
+                f"Reasons: {risk_detail} | Claims checked: {len(claims)}"
+            )
         )
         self._update_action_buttons(item)
         self.refresh_agent_context()
@@ -1045,16 +1312,96 @@ class MSquaredDesktopApp(tk.Tk):
             self.refresh_queue(select_item_id=self.selected_item_id)
             self.refresh_diagnostics()
 
+    def edit_selected_final_draft(self):
+        item = self._selected_queue_item()
+        if not item:
+            return
+        if item.get("status") not in {"drafted", "needs_review"}:
+            messagebox.showinfo("Cannot edit", "Only drafted or needs_review items can be edited before approval.")
+            return
+
+        original = item.get("final_draft") or item.get("draft") or ""
+        editor = tk.Toplevel(self)
+        editor.title(f"Edit Final Draft - {item.get('id')}")
+        editor.geometry("760x520")
+        editor.minsize(560, 360)
+        editor.columnconfigure(0, weight=1)
+        editor.rowconfigure(0, weight=1)
+        text = tk.Text(editor, wrap=tk.WORD, font=("Segoe UI", 10), undo=True)
+        text.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        text.insert("1.0", original)
+
+        actions = ttk.Frame(editor)
+        actions.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+
+        def save_edit():
+            updated_text = text.get("1.0", tk.END).strip()
+            if not updated_text:
+                messagebox.showinfo("Draft needed", "The final draft cannot be empty.")
+                return
+            delta = "\n".join(
+                difflib.unified_diff(
+                    original.splitlines(),
+                    updated_text.splitlines(),
+                    fromfile="before",
+                    tofile="after",
+                    lineterm="",
+                )
+            )
+            risk = classify_action(item.get("channel", ""), item.get("action_type") or item.get("type", ""), updated_text, item.get("source") or {})
+            versions = list(item.get("draft_versions", []))
+            versions.append({
+                "version": "human_edited",
+                "text": updated_text,
+                "source": "Operator",
+                "rationale": "Human operator edited final draft before approval.",
+            })
+            update_approval_item(
+                item["id"],
+                {
+                    "final_draft": updated_text,
+                    "draft": updated_text,
+                    "draft_versions": versions,
+                    "selected_version": "human_edited",
+                    "human_edits_delta": delta,
+                    "risk_level": risk["level"],
+                    "risks": risk["reasons"],
+                    "claims_checked": risk["claims_checked"],
+                    "category": risk.get("category"),
+                    "pipeline_state": "human_edited",
+                    "status": "needs_review" if risk["level"] in {"medium", "high", "block"} else "drafted",
+                },
+            )
+            log_event(
+                "draft_final_edited",
+                "info",
+                "Operator edited the final draft before approval.",
+                {"approval_item_id": item.get("id"), "risk_level": risk["level"], "changed": bool(delta)},
+            )
+            editor.destroy()
+            self.status_text.set(f"Saved edited final draft for {item['id']}.")
+            self.refresh_queue(select_item_id=item["id"])
+            self.refresh_agent_context()
+            self.refresh_diagnostics()
+
+        ttk.Button(actions, text="Cancel", command=editor.destroy).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="Save Edited Final", style="Accent.TButton", command=save_edit).pack(side=tk.RIGHT, padx=(0, 8))
+        editor.transient(self)
+        editor.grab_set()
+
     def prepare_selected_payload(self):
         item = self._selected_queue_item()
         if not item:
             return
         try:
-            payload = prepare_x_payload(item["id"]) if item.get("channel") == "x" else prepare_email_payload(item["id"])
-            self._set_text(self.payload_preview, json.dumps(payload, indent=2))
-            self.prepared_payload_item_id = item["id"]
-            self._update_action_buttons(item)
-            self.status_text.set(f"Prepared payload for {item['id']}. Nothing was posted or sent.")
+            result = run_action_preflight(item["id"])
+            self.prepared_payload_item_id = item["id"] if result.get("decision") == "pass" else None
+            if result.get("decision") == "pass":
+                self.status_text.set(f"Preflight passed and prepared payload for {item['id']}. Nothing was posted or sent.")
+            else:
+                self.status_text.set(f"Preflight blocked payload preparation for {item['id']}.")
+            self.refresh_queue(select_item_id=item["id"])
+            self._set_text(self.payload_preview, json.dumps(result.get("payload") or result, indent=2, default=str))
             self.refresh_diagnostics()
         except Exception as exc:
             log_event("payload_prepare_failed", "warning", "Payload preparation was blocked.", {"approval_item_id": item.get("id"), "error": str(exc)})
@@ -1129,8 +1476,14 @@ class MSquaredDesktopApp(tk.Tk):
                 "app_log": str(APP_LOG_FILE),
                 "audit_log": str(AUDIT_FILE),
                 "approval_queue": str(app_root() / "data" / "approval_queue.json"),
+                "intake": str(app_root() / "data" / "inbound_items.json"),
+                "feedback": str(app_root() / "data" / "agent_feedback.jsonl"),
+                "knowledge_index": str(app_root() / "data" / "product_knowledge_index.json"),
             },
             "connector_readiness": connector_status(),
+            "pipeline": self._pipeline_status(),
+            "knowledge_library": knowledge_status(),
+            "governed_learning": feedback_summary(),
         }
         self._set_text(self.app_log_box, self._format_records(app_events, "event"))
         self._set_text(self.audit_log_box, self._format_records(audit_records, "action"))
@@ -1141,6 +1494,9 @@ class MSquaredDesktopApp(tk.Tk):
             "recent_app_log": read_log_events(limit=50),
             "recent_audit": read_audit_records()[-50:],
             "readiness": connector_status(),
+            "pipeline": self._pipeline_status(),
+            "knowledge_library": knowledge_status(),
+            "governed_learning": feedback_summary(),
             "paths": {
                 "app_root": str(app_root()),
                 "data_dir": str(app_root() / "data"),
@@ -1231,6 +1587,10 @@ class MSquaredDesktopApp(tk.Tk):
         for item in self.queue_items:
             if item.get("id") == self.selected_item_id:
                 return item
+        if self.selected_item_id:
+            for item in list_queue():
+                if item.get("id") == self.selected_item_id:
+                    return item
         return None
 
     def _set_text(self, widget, text: str):
@@ -1241,17 +1601,21 @@ class MSquaredDesktopApp(tk.Tk):
 
     def _update_action_buttons(self, item: dict | None):
         if not item:
-            for button in (self.approve_button, self.reject_button, self.prepare_button, self.post_send_button):
+            for button in (self.approve_button, self.reject_button, self.edit_final_button, self.prepare_button, self.post_send_button):
                 button.configure(state=tk.DISABLED)
+            self._update_action_center_buttons()
             return
         can_decide = item.get("status") in {"drafted", "needs_review"}
         can_approve = can_decide and item.get("risk_level") != "block"
+        can_edit = can_decide
         can_prepare = item.get("status") == "approved" and item.get("risk_level") != "block"
         can_execute = can_prepare and self.prepared_payload_item_id == item.get("id")
         self.approve_button.configure(state=tk.NORMAL if can_approve else tk.DISABLED)
         self.reject_button.configure(state=tk.NORMAL if can_decide else tk.DISABLED)
+        self.edit_final_button.configure(state=tk.NORMAL if can_edit else tk.DISABLED)
         self.prepare_button.configure(state=tk.NORMAL if can_prepare else tk.DISABLED)
         self.post_send_button.configure(state=tk.NORMAL if can_execute else tk.DISABLED)
+        self._update_action_center_buttons()
 
     def _confirm_live_action_if_needed(self, item: dict) -> bool:
         flags = load_feature_flags()
@@ -1298,6 +1662,29 @@ class MSquaredDesktopApp(tk.Tk):
                 return f"{channel.title()} refresh skipped: {message} {item_count} item(s) imported or already present."
             return f"{channel.title()} refresh {level.lower()}: {message} {item_count} item(s) imported or already present."
         return f"{channel.title()} refresh complete. {item_count} item(s) imported or already present."
+
+    def _pipeline_status(self) -> dict:
+        intake_items = list_intake("all")
+        queue_items = list_queue()
+        intake_by_status = {}
+        intake_by_channel = {}
+        queue_by_status = {}
+        queue_by_pipeline = {}
+        for item in intake_items:
+            intake_by_status[item.get("status", "unknown")] = intake_by_status.get(item.get("status", "unknown"), 0) + 1
+            intake_by_channel[item.get("channel", "unknown")] = intake_by_channel.get(item.get("channel", "unknown"), 0) + 1
+        for item in queue_items:
+            queue_by_status[item.get("status", "unknown")] = queue_by_status.get(item.get("status", "unknown"), 0) + 1
+            state = item.get("pipeline_state", "draft_ready")
+            queue_by_pipeline[state] = queue_by_pipeline.get(state, 0) + 1
+        return {
+            "intake_count": len(intake_items),
+            "intake_by_status": intake_by_status,
+            "intake_by_channel": intake_by_channel,
+            "approval_count": len(queue_items),
+            "approval_by_status": queue_by_status,
+            "approval_by_pipeline_state": queue_by_pipeline,
+        }
 
     def _format_records(self, records: list, label_key: str) -> str:
         if not records:

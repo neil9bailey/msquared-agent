@@ -129,6 +129,21 @@ Fix sequence:
 4. Confirm `X_MONITOR_USER_ID` is the numeric user id for `@MSQUARED_2026` to avoid an extra handle lookup call.
 5. Click **Test X Connection**, then refresh X once the test passes.
 
+## Troubleshooting X 403 OAuth 1.0a App Permissions
+If posting fails with `Your client app is not configured with the appropriate oauth1 app permissions for this endpoint`, the app has fallen back to OAuth 1.0a credentials and X is rejecting them for `/2/tweets`.
+
+Preferred fix:
+
+1. Save both `X_OAUTH2_ACCESS_TOKEN` and `X_OAUTH2_REFRESH_TOKEN` in **Settings -> Admin**.
+2. Confirm **Readiness & Paths** shows `write_auth_mode` as `oauth2_user`.
+3. Approve the draft again and post.
+
+Fallback fix:
+
+1. In the X Developer Portal, set app permissions to **Read and write**.
+2. Regenerate the OAuth 1.0a access token and access token secret after the permission change.
+3. Save the new OAuth 1.0a values in **Settings -> Admin**.
+
 ## Diagnostics and logs
 Open **Diagnostics** in the desktop console to inspect:
 

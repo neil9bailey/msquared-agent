@@ -1,9 +1,12 @@
 import requests
+import pytest
 
+from msquared_agent.agent import generate_draft
+from msquared_agent.approval_queue import approve_item
 from msquared_agent.app_log import read_log_events
 from msquared_agent.env_loader import read_env_values
 from msquared_agent.settings import save_feature_flags
-from msquared_agent.x_adapter import fetch_x_feed, refresh_oauth2_access_token, test_x_connection as run_x_connection_test
+from msquared_agent.x_adapter import fetch_x_feed, post_approved_tweet, refresh_oauth2_access_token, test_x_connection as run_x_connection_test
 
 
 class FakeResponse:
@@ -242,3 +245,66 @@ def test_x_connection_reports_401_guidance():
     assert result["http_status"] == 401
     assert "user-context token" in result["message"]
     assert "Invalid or expired token" in result["provider_detail"]
+
+
+def test_post_approved_tweet_uses_oauth2_direct_request():
+    save_feature_flags({"ENABLE_X_WRITE": True, "REQUIRE_HUMAN_APPROVAL": True})
+    item = generate_draft("x_post", "Governed decisions need signed evidence.")
+    approve_item(item["id"])
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return FakeResponse({"data": {"id": "tweet_123", "text": json["text"]}}, url=url)
+
+    result = post_approved_tweet(item["id"], {
+        "oauth2_access_token": "oauth2-user-token",
+        "http_post": fake_post,
+    })
+
+    assert result["sent"] is True
+    assert result["auth_mode"] == "oauth2_user"
+    assert result["result"]["id"] == "tweet_123"
+    assert calls == [
+        {
+            "url": "https://api.x.com/2/tweets",
+            "headers": {"Authorization": "Bearer oauth2-user-token", "Content-Type": "application/json"},
+            "json": {"text": item["draft"]},
+            "timeout": 20,
+        }
+    ]
+
+
+def test_post_approved_tweet_oauth1_permission_error_has_guidance(monkeypatch):
+    import tweepy
+
+    save_feature_flags({"ENABLE_X_WRITE": True, "REQUIRE_HUMAN_APPROVAL": True})
+    item = generate_draft("x_post", "Governed decisions need human accountability.")
+    approve_item(item["id"])
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def create_tweet(self, **kwargs):
+            response = FakeResponse(
+                {"detail": "Your client app is not configured with the appropriate oauth1 app permissions for this endpoint."},
+                status_code=403,
+                url="https://api.x.com/2/tweets",
+            )
+            response.raise_for_status()
+
+    monkeypatch.setattr(tweepy, "Client", FakeClient)
+
+    with pytest.raises(RuntimeError) as exc:
+        post_approved_tweet(item["id"], {
+            "consumer_key": "consumer-key",
+            "consumer_secret": "consumer-secret",
+            "access_token": "access-token",
+            "access_token_secret": "access-token-secret",
+        })
+
+    message = str(exc.value)
+    assert "OAuth 1.0a app permissions" in message
+    assert "X_OAUTH2_ACCESS_TOKEN" in message
+    assert "Read and write" in message

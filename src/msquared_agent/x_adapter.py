@@ -348,6 +348,21 @@ def _create_tweet_with_retry(client, kwargs: dict, user_auth=None):
     return client.create_tweet(user_auth=user_auth, **kwargs)
 
 
+def _post_tweet_with_oauth2(payload_json: dict, access_token: str, http_post=None) -> dict:
+    response = _x_post_with_retry(
+        http_post or requests.post,
+        f"{X_API_BASE}/2/tweets",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        json=payload_json,
+        timeout=20,
+    )
+    payload = response.json()
+    return payload.get("data") or payload
+
+
 def refresh_oauth2_access_token(config: dict | None = None) -> str:
     config = config or {}
     refresh_token = config.get("oauth2_refresh_token") or get_env("X_OAUTH2_REFRESH_TOKEN")
@@ -546,6 +561,33 @@ def _x_connection_result(ok: bool, auth_mode: str, checks: list[dict], exc: Exce
     return result
 
 
+def _x_post_failure_message(exc: Exception, auth_mode: str) -> str:
+    status = _http_status(exc)
+    detail = _x_error_detail(exc) or str(exc)
+    detail_suffix = f" Provider detail: {detail}" if detail else ""
+    if auth_mode == "oauth1a_user" and status == 403:
+        return (
+            "X post failed with OAuth 1.0a app permissions. The app or OAuth 1.0a access token is not write-enabled "
+            "for /2/tweets. Prefer OAuth 2.0 user-context posting by saving X_OAUTH2_ACCESS_TOKEN and "
+            "X_OAUTH2_REFRESH_TOKEN in Admin, or regenerate the OAuth 1.0a access token and secret after setting the "
+            "X app permissions to Read and write."
+            f"{detail_suffix}"
+        )
+    if auth_mode == "oauth2_user" and status == 403:
+        return (
+            "X post failed with OAuth 2.0 user-context permissions. Regenerate the OAuth 2.0 tokens after enabling "
+            "Read and write permissions and ensure the scopes include tweet.write, tweet.read, users.read, and offline.access."
+            f"{detail_suffix}"
+        )
+    if status == 401:
+        return f"X post failed with 401 Unauthorized. {UNAUTHORIZED_HELP}{detail_suffix}"
+    if status == 429:
+        return "X post failed because the X API rate limit was exceeded. Wait and retry from the approval queue."
+    if status == 402:
+        return PAYMENT_REQUIRED_HELP
+    return f"X post failed. Check X credentials, write permissions, endpoint access, and rate limits.{detail_suffix}"
+
+
 def _add_x_tweet(tweet: dict, source_type: str) -> dict:
     return add_intake_item({
         "channel": "x",
@@ -622,25 +664,27 @@ def post_approved_tweet(item_id: str, client_config: dict | None = None):
     if feature_enabled("REQUIRE_HUMAN_APPROVAL") and get_approval_item(item_id).get("status") != "approved":
         raise PermissionError("Human approval is required before posting to X.")
 
+    auth_mode = "missing"
     try:
-        import tweepy
-
         load_env_file()
         config = client_config or {}
+        http_post = config.get("http_post") or requests.post
         oauth2_access_token = config.get("oauth2_access_token") or get_env("X_OAUTH2_ACCESS_TOKEN")
         if oauth2_access_token or _has_oauth2_refresh_token(config):
+            auth_mode = "oauth2_user"
             if not oauth2_access_token:
                 oauth2_access_token = refresh_oauth2_access_token(config)
-            client = tweepy.Client(bearer_token=oauth2_access_token, wait_on_rate_limit=True)
             try:
-                result = _create_tweet_with_retry(client, _tweet_kwargs_from_payload(payload["json"]), user_auth=False)
+                result_data = _post_tweet_with_oauth2(payload["json"], oauth2_access_token, http_post)
             except Exception as exc:
                 if not _is_unauthorized(exc) or not _has_oauth2_refresh_token(config):
                     raise
                 oauth2_access_token = refresh_oauth2_access_token(config)
-                client = tweepy.Client(bearer_token=oauth2_access_token, wait_on_rate_limit=True)
-                result = _create_tweet_with_retry(client, _tweet_kwargs_from_payload(payload["json"]), user_auth=False)
+                result_data = _post_tweet_with_oauth2(payload["json"], oauth2_access_token, http_post)
         else:
+            auth_mode = "oauth1a_user"
+            import tweepy
+
             consumer_key = config.get("consumer_key") or get_env("X_CONSUMER_KEY") or get_env("X_API_KEY")
             consumer_secret = config.get("consumer_secret") or get_env("X_CONSUMER_SECRET") or get_env("X_API_SECRET")
             client = tweepy.Client(
@@ -652,30 +696,40 @@ def post_approved_tweet(item_id: str, client_config: dict | None = None):
                 wait_on_rate_limit=True,
             )
             result = _create_tweet_with_retry(client, _tweet_kwargs_from_payload(payload["json"]))
+            result_data = getattr(result, "data", result)
         mark_sent_or_posted(item_id)
-        log_event("x_post_complete", "info", "Approved X item posted.", {"approval_item_id": item_id})
+        log_event("x_post_complete", "info", "Approved X item posted.", {"approval_item_id": item_id, "auth_mode": auth_mode})
         log_action({
             "action": "x_posted",
             "approval_item_id": item_id,
             "channel": "x",
+            "auth_mode": auth_mode,
             "final_action_status": "sent_or_posted",
         })
-        return {"sent": True, "result": result.data, "payload": payload}
+        return {"sent": True, "result": result_data, "payload": payload, "auth_mode": auth_mode}
     except Exception as exc:
+        message = _x_post_failure_message(exc, auth_mode)
         log_event(
             "x_post_failed",
             "error",
             "Approved X item failed to post.",
-            {"approval_item_id": item_id, "error": str(exc)},
+            {
+                "approval_item_id": item_id,
+                "auth_mode": auth_mode,
+                "http_status": _http_status(exc),
+                "error": message,
+                "raw_error": str(exc),
+            },
         )
         log_action({
             "action": "x_post_failed",
             "approval_item_id": item_id,
             "channel": "x",
+            "auth_mode": auth_mode,
             "final_action_status": "failed",
-            "error": str(exc),
+            "error": message,
         })
-        raise
+        raise RuntimeError(message) from exc
 
 
 def _tweet_kwargs_from_payload(payload_json: dict) -> dict:

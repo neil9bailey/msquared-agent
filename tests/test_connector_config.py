@@ -235,3 +235,24 @@ def test_admin_settings_persist_credentials_and_feature_flags(monkeypatch):
     assert "oauth2-client-secret" not in str(status)
     assert "consumer-secret" not in str(status)
     assert "mail-secret" not in str(status)
+
+
+def test_x_oauth1_only_is_unverified_for_posting_by_default():
+    save_feature_flags({"ENABLE_X_WRITE": True})
+    save_env_values({
+        "X_CONSUMER_KEY": "consumer-key",
+        "X_CONSUMER_SECRET": "consumer-secret",
+        "X_API_KEY": "consumer-key",
+        "X_API_SECRET": "consumer-secret",
+        "X_ACCESS_TOKEN": "access-token",
+        "X_ACCESS_TOKEN_SECRET": "access-token-secret",
+        "X_ALLOW_OAUTH1_POSTING_FALLBACK": "false",
+    })
+
+    status = connector_status()
+
+    assert status["x"]["write_credentials_configured"] is True
+    assert status["x"]["oauth1a_credentials_configured"] is True
+    assert status["x"]["write_auth_mode"] == "oauth1a_user_unverified"
+    assert status["x"]["ready_to_write"] is False
+    assert "OAuth 2.0 user-context" in status["x"]["write_setup_warning"]

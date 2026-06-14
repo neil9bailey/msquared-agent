@@ -56,10 +56,12 @@ def _preflight_item(item: dict) -> dict:
         payload = prepare_x_payload(item["id"])
         checks.append({"name": "payload", "ok": True, "endpoint": payload.get("endpoint")})
         checks.append({"name": "connector_ready", "ok": bool(status["x"]["ready_to_write"]), "auth_mode": status["x"].get("write_auth_mode")})
+        if not status["x"]["ready_to_write"]:
+            return _blocked(_x_write_not_ready_message(status["x"]), checks, item, action, payload)
         return {
             "decision": "pass",
             "action": action,
-            "message": "X action is ready for final operator confirmation." if status["x"]["ready_to_write"] else "Payload is valid; enable X write and connector readiness before executing live.",
+            "message": "X action is ready for final operator confirmation.",
             "target": reply_to if action == "x_reply" else "MSquared X account",
             "checks": checks,
             "payload": payload,
@@ -69,10 +71,12 @@ def _preflight_item(item: dict) -> dict:
         payload = prepare_email_payload(item["id"])
         checks.append({"name": "payload", "ok": True, "recipient": payload.get("to")})
         checks.append({"name": "connector_ready", "ok": bool(status["email"]["ready_to_send"])})
+        if not status["email"]["ready_to_send"]:
+            return _blocked("Email payload is valid, but SMTP send readiness is incomplete. Enable email send and check SMTP settings.", checks, item, "email_send", payload)
         return {
             "decision": "pass",
             "action": "email_send",
-            "message": "Email action is ready for final operator confirmation." if status["email"]["ready_to_send"] else "Payload is valid; enable email send and connector readiness before executing live.",
+            "message": "Email action is ready for final operator confirmation.",
             "target": payload.get("to"),
             "checks": checks,
             "payload": payload,
@@ -81,7 +85,20 @@ def _preflight_item(item: dict) -> dict:
     return _blocked("Unsupported channel for final action.", checks, item)
 
 
-def _blocked(message: str, checks: list[dict], item: dict, action: str = "") -> dict:
+def _x_write_not_ready_message(status: dict) -> str:
+    warning = status.get("write_setup_warning") or ""
+    if status.get("write_auth_mode") == "oauth1a_user_unverified":
+        return (
+            "X payload is valid, but posting is not armed because only OAuth 1.0a credentials are configured. "
+            "Use Admin -> Generate OAuth 2 Tokens so X_OAUTH2_ACCESS_TOKEN and X_OAUTH2_REFRESH_TOKEN are saved. "
+            f"{warning}"
+        ).strip()
+    if not status.get("write_enabled"):
+        return "X payload is valid, but ENABLE_X_WRITE is disabled. Enable X write only when you are ready for live posting."
+    return f"X payload is valid, but X write readiness is incomplete. {warning}".strip()
+
+
+def _blocked(message: str, checks: list[dict], item: dict, action: str = "", payload: dict | None = None) -> dict:
     checks.append({"name": "blocked", "ok": False, "message": message})
     return {
         "decision": "blocked",
@@ -89,5 +106,5 @@ def _blocked(message: str, checks: list[dict], item: dict, action: str = "") -> 
         "message": message,
         "target": "",
         "checks": checks,
-        "payload": {},
+        "payload": payload or {},
     }

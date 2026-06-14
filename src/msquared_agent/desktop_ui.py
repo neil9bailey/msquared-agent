@@ -2,6 +2,7 @@ import difflib
 import json
 import threading
 import tkinter as tk
+import webbrowser
 from tkinter import messagebox, simpledialog, ttk
 
 from msquared_agent.action_preflight import run_action_preflight
@@ -21,7 +22,7 @@ from msquared_agent.product_knowledge import build_product_knowledge_index, buil
 from msquared_agent.risk_classifier import classify_action
 from msquared_agent.settings import DEFAULT_FEATURE_FLAGS, load_feature_flags, save_feature_flags
 from msquared_agent.text_hygiene import display_excerpt, product_excerpt
-from msquared_agent.x_adapter import fetch_x_feed, post_approved_tweet, test_x_connection
+from msquared_agent.x_adapter import build_oauth2_authorization_url, exchange_oauth2_authorization_code, fetch_x_feed, post_approved_tweet, test_x_connection
 
 
 class MSquaredDesktopApp(tk.Tk):
@@ -52,6 +53,7 @@ class MSquaredDesktopApp(tk.Tk):
         self.show_secrets = tk.BooleanVar(value=False)
         self.show_knowledge_used = tk.BooleanVar(value=False)
         self.prepared_payload_item_id = None
+        self.pending_x_oauth2_flow = None
         self.agent_messages = []
         self.agent_busy = False
         self.knowledge_busy = False
@@ -484,6 +486,7 @@ class MSquaredDesktopApp(tk.Tk):
         values.setdefault("X_APP_PERMISSIONS", "Read and write")
         values.setdefault("X_APP_TYPE", "Web App, Automated App or Bot")
         values.setdefault("X_REQUEST_EMAIL_FROM_USERS", "false")
+        values.setdefault("X_ALLOW_OAUTH1_POSTING_FALLBACK", "false")
         values.setdefault("EMAIL_IMAP_SERVER", "imap.porkbun.com")
         values.setdefault("EMAIL_IMAP_PORT", "993")
         values.setdefault("EMAIL_IMAP_SECURITY", "SSL/TLS")
@@ -528,14 +531,18 @@ class MSquaredDesktopApp(tk.Tk):
         self._admin_entry(x_frame, 19, "OAuth 1.0a Consumer Key Secret", "X_CONSUMER_SECRET", values, secret=True)
         self._admin_entry(x_frame, 20, "OAuth 1.0a Access Token", "X_ACCESS_TOKEN", values, secret=True)
         self._admin_entry(x_frame, 21, "OAuth 1.0a Access Token Secret", "X_ACCESS_TOKEN_SECRET", values, secret=True)
-        self._admin_entry(x_frame, 22, "MSquared numeric X user id", "X_MONITOR_USER_ID", values)
-        self._admin_entry(x_frame, 23, "Monitor query", "X_MONITOR_QUERY", values)
+        self._admin_combo(x_frame, 22, "Allow OAuth 1.0a posting fallback", "X_ALLOW_OAUTH1_POSTING_FALLBACK", values, ("false", "true"))
+        self._admin_entry(x_frame, 23, "MSquared numeric X user id", "X_MONITOR_USER_ID", values)
+        self._admin_entry(x_frame, 24, "Monitor query", "X_MONITOR_QUERY", values)
+        oauth_actions = ttk.Frame(x_frame)
+        oauth_actions.grid(row=25, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ttk.Button(oauth_actions, text="Generate OAuth 2 Tokens", command=self.generate_x_oauth2_tokens).pack(side=tk.LEFT)
         x_hint = (
             "Read monitoring uses the App Bearer Token first. OAuth 2.0 Client ID/Secret alone are not API tokens; "
-            "use X's Generate access token and refresh token action only when you want OAuth 2.0 user-context posting. "
-            "OAuth 1.0a Access Token can be used as the posting fallback after it is regenerated with Read and write permissions."
+            "use Generate OAuth 2 Tokens to authorize the MSquared account and save user-context posting tokens. "
+            "OAuth 1.0a fallback is off by default because X may reject older access tokens for /2/tweets."
         )
-        ttk.Label(x_frame, text=x_hint, wraplength=500).grid(row=24, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(x_frame, text=x_hint, wraplength=500).grid(row=26, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         email_frame = ttk.LabelFrame(parent, text="Email Connector", padding=10)
         email_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 8))
@@ -674,6 +681,74 @@ class MSquaredDesktopApp(tk.Tk):
         combo = ttk.Combobox(parent, textvariable=var, values=options, state="readonly")
         combo.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=3)
         return combo
+
+    def _x_oauth_admin_config(self) -> dict:
+        def value(key: str) -> str:
+            var = self.admin_vars.get(key)
+            return var.get().strip() if var else ""
+
+        return {
+            "client_id": value("X_CLIENT_ID"),
+            "client_secret": value("X_CLIENT_SECRET"),
+            "callback_uri": value("X_CALLBACK_URI"),
+        }
+
+    def generate_x_oauth2_tokens(self):
+        config = self._x_oauth_admin_config()
+        try:
+            save_env_values({
+                "X_CLIENT_ID": config["client_id"],
+                "X_CLIENT_SECRET": config["client_secret"],
+                "X_CALLBACK_URI": config["callback_uri"],
+                "X_ALLOW_OAUTH1_POSTING_FALLBACK": self.admin_vars.get("X_ALLOW_OAUTH1_POSTING_FALLBACK").get().strip()
+                if self.admin_vars.get("X_ALLOW_OAUTH1_POSTING_FALLBACK")
+                else "false",
+            })
+            flow = build_oauth2_authorization_url(config)
+            self.pending_x_oauth2_flow = flow
+            self.clipboard_clear()
+            self.clipboard_append(flow["authorization_url"])
+            webbrowser.open(flow["authorization_url"])
+            log_event("x_oauth2_authorization_started", "info", "X OAuth 2.0 authorization URL opened.", {"scope": flow["scope"]})
+        except Exception as exc:
+            log_event("x_oauth2_authorization_start_failed", "error", "Could not start X OAuth 2.0 authorization.", {"error": str(exc)})
+            messagebox.showerror("OAuth 2 setup blocked", str(exc))
+            self.refresh_diagnostics()
+            return
+
+        pasted = simpledialog.askstring(
+            "Paste X redirect",
+            "The X authorization URL opened in your browser and was copied to the clipboard.\n\n"
+            "Authorize the MSquared X account, then paste the final redirected URL or the code value here:",
+        )
+        if not pasted:
+            self.status_text.set("X OAuth 2 token generation started but no code was pasted.")
+            return
+
+        try:
+            result = exchange_oauth2_authorization_code(
+                pasted,
+                flow["code_verifier"],
+                flow["state"],
+                config,
+            )
+            values = read_env_values()
+            for key in ("X_OAUTH2_ACCESS_TOKEN", "X_OAUTH2_REFRESH_TOKEN", "X_OAUTH2_ACCESS_TOKEN_EXPIRES_AT", "X_OAUTH2_SCOPE"):
+                if key in self.admin_vars:
+                    self.admin_vars[key].set(values.get(key, ""))
+            self.pending_x_oauth2_flow = None
+            self.refresh_connector_status()
+            self.refresh_diagnostics()
+            messagebox.showinfo(
+                "OAuth 2 tokens saved",
+                "X OAuth 2 user-context tokens were saved. Run Test X Connection, then preflight the approved draft again.",
+            )
+            self.status_text.set(f"X OAuth 2 tokens saved. Scope: {result.get('scope') or 'not returned by X'}.")
+        except Exception as exc:
+            log_event("x_oauth2_authorization_exchange_failed", "error", "X OAuth 2.0 authorization code exchange failed.", {"error": str(exc)})
+            messagebox.showerror("OAuth 2 exchange failed", str(exc))
+            self.status_text.set("X OAuth 2 token generation failed. See Diagnostics.")
+            self.refresh_diagnostics()
 
     def refresh_x(self):
         items = fetch_x_feed({})
@@ -1531,6 +1606,7 @@ class MSquaredDesktopApp(tk.Tk):
         values.setdefault("X_APP_PERMISSIONS", "Read and write")
         values.setdefault("X_APP_TYPE", "Web App, Automated App or Bot")
         values.setdefault("X_REQUEST_EMAIL_FROM_USERS", "false")
+        values.setdefault("X_ALLOW_OAUTH1_POSTING_FALLBACK", "false")
         values.setdefault("EMAIL_IMAP_SERVER", "imap.porkbun.com")
         values.setdefault("EMAIL_IMAP_PORT", "993")
         values.setdefault("EMAIL_IMAP_SECURITY", "SSL/TLS")
@@ -1637,17 +1713,19 @@ class MSquaredDesktopApp(tk.Tk):
             ready = bool(status["x"]["ready_to_write"])
             expected = "POST"
             target = "the configured MSquared X account"
+            not_ready_message = status["x"].get("write_setup_warning") or "Live X posting readiness is incomplete. Generate OAuth 2 tokens and run Test X Connection."
         else:
             live_enabled = bool(flags.get("ENABLE_EMAIL_SEND"))
             ready = bool(status["email"]["ready_to_send"])
             expected = "SEND"
             target = "the approved email recipient"
+            not_ready_message = "Live email sending readiness is incomplete. Check SMTP settings."
 
         if not live_enabled:
             return True
         if not ready:
-            messagebox.showerror("Connector not ready", "Live action is enabled, but connector readiness is incomplete. Check Diagnostics.")
-            log_event("live_action_blocked", "warning", "Live action blocked because connector readiness is incomplete.", {"approval_item_id": item.get("id"), "channel": item.get("channel")})
+            messagebox.showerror("Connector not ready", not_ready_message)
+            log_event("live_action_blocked", "warning", "Live action blocked because connector readiness is incomplete.", {"approval_item_id": item.get("id"), "channel": item.get("channel"), "message": not_ready_message})
             return False
         answer = simpledialog.askstring(
             "Confirm live action",

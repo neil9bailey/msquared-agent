@@ -29,6 +29,7 @@ def x_connector_config() -> dict:
         "consumer_secret": get_env("X_CONSUMER_SECRET") or get_env("X_API_SECRET"),
         "access_token": get_env("X_ACCESS_TOKEN"),
         "access_token_secret": get_env("X_ACCESS_TOKEN_SECRET"),
+        "allow_oauth1_posting_fallback": get_env("X_ALLOW_OAUTH1_POSTING_FALLBACK", "false"),
         "monitor_query": get_env("X_MONITOR_QUERY", "DIIaC OR MSquared OR governed decision intelligence"),
         "monitor_user_id": get_env("X_MONITOR_USER_ID"),
         "app_permissions": get_env("X_APP_PERMISSIONS", "Read and write"),
@@ -80,6 +81,20 @@ def connector_status() -> dict:
     x_write_keys = ["api_key", "api_secret", "access_token", "access_token_secret"]
     oauth2_user_configured = bool(x_config["oauth2_access_token"] or x_config["oauth2_refresh_token"])
     oauth1a_user_configured = all(bool(x_config[key]) for key in x_write_keys)
+    oauth1a_fallback_allowed = env_bool("X_ALLOW_OAUTH1_POSTING_FALLBACK", False)
+    x_ready_to_write = bool(flags.get("ENABLE_X_WRITE") and (oauth2_user_configured or (oauth1a_user_configured and oauth1a_fallback_allowed)))
+    if oauth2_user_configured:
+        write_auth_mode = "oauth2_user"
+        write_setup_warning = ""
+    elif oauth1a_user_configured and oauth1a_fallback_allowed:
+        write_auth_mode = "oauth1a_user"
+        write_setup_warning = "OAuth 1.0a posting fallback is enabled; X may still reject /2/tweets if the access token was not regenerated after Read and write permissions."
+    elif oauth1a_user_configured:
+        write_auth_mode = "oauth1a_user_unverified"
+        write_setup_warning = "OAuth 1.0a credentials are present, but OAuth 2.0 user-context tokens are recommended and required by default for /2/tweets posting."
+    else:
+        write_auth_mode = "missing"
+        write_setup_warning = "X write is missing OAuth 2.0 user-context access and refresh tokens."
     email_read_keys = ["imap_server", "imap_port", "imap_security", "email", "password"]
     email_send_keys = ["smtp_server", "smtp_port", "smtp_security", "email", "password"]
 
@@ -95,7 +110,10 @@ def connector_status() -> dict:
             "oauth2_scope_configured": bool(x_config["oauth2_scope"]),
             "bearer_token_configured": bool(x_config["bearer_token"]),
             "write_credentials_configured": bool(oauth2_user_configured or oauth1a_user_configured),
-            "write_auth_mode": "oauth2_user" if oauth2_user_configured else "oauth1a_user" if oauth1a_user_configured else "missing",
+            "oauth1a_credentials_configured": bool(oauth1a_user_configured),
+            "oauth1a_posting_fallback_allowed": bool(oauth1a_fallback_allowed),
+            "write_auth_mode": write_auth_mode,
+            "write_setup_warning": write_setup_warning,
             "monitor_query": x_config["monitor_query"],
             "monitor_user_id": x_config["monitor_user_id"] or "",
             "monitor_user_reference_type": _x_monitor_reference_type(x_config["monitor_user_id"]),
@@ -106,7 +124,7 @@ def connector_status() -> dict:
             "terms_url_configured": bool(x_config["terms_url"]),
             "privacy_url_configured": bool(x_config["privacy_url"]),
             "ready_to_read": bool(flags.get("ENABLE_X_READ") and (x_config["oauth2_access_token"] or x_config["oauth2_refresh_token"] or x_config["bearer_token"])),
-            "ready_to_write": bool(flags.get("ENABLE_X_WRITE") and (oauth2_user_configured or oauth1a_user_configured)),
+            "ready_to_write": x_ready_to_write,
             "masked_client_id": mask_secret(x_config["client_id"]),
             "masked_oauth2_access_token": mask_secret(x_config["oauth2_access_token"]),
             "masked_oauth2_refresh_token": mask_secret(x_config["oauth2_refresh_token"]),

@@ -6,7 +6,14 @@ from msquared_agent.approval_queue import approve_item
 from msquared_agent.app_log import read_log_events
 from msquared_agent.env_loader import read_env_values
 from msquared_agent.settings import save_feature_flags
-from msquared_agent.x_adapter import fetch_x_feed, post_approved_tweet, refresh_oauth2_access_token, test_x_connection as run_x_connection_test
+from msquared_agent.x_adapter import (
+    build_oauth2_authorization_url,
+    exchange_oauth2_authorization_code,
+    fetch_x_feed,
+    post_approved_tweet,
+    refresh_oauth2_access_token,
+    test_x_connection as run_x_connection_test,
+)
 
 
 class FakeResponse:
@@ -258,6 +265,60 @@ def test_oauth2_refresh_saves_rotated_tokens(monkeypatch):
     assert "new-access-token" not in str(read_log_events())
 
 
+def test_oauth2_authorization_url_uses_pkce_and_requested_scopes():
+    flow = build_oauth2_authorization_url({
+        "client_id": "client-id",
+        "callback_uri": "https://example.com/oauth/x/callback",
+    })
+
+    assert flow["authorization_url"].startswith("https://twitter.com/i/oauth2/authorize?")
+    assert "client_id=client-id" in flow["authorization_url"]
+    assert "code_challenge_method=S256" in flow["authorization_url"]
+    assert "tweet.write" in flow["scope"]
+    assert "offline.access" in flow["scope"]
+    assert flow["code_verifier"]
+    assert flow["state"]
+
+
+def test_oauth2_authorization_code_exchange_saves_tokens():
+    captured = {}
+
+    def fake_post(url, headers=None, data=None, timeout=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["data"] = data
+        captured["timeout"] = timeout
+        return FakeResponse({
+            "access_token": "new-user-access-token",
+            "refresh_token": "new-user-refresh-token",
+            "expires_in": 7200,
+            "scope": "tweet.read tweet.write users.read offline.access",
+        }, url=url)
+
+    result = exchange_oauth2_authorization_code(
+        "https://example.com/oauth/x/callback?state=state-123&code=auth-code-123",
+        "verifier-123",
+        "state-123",
+        {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "callback_uri": "https://example.com/oauth/x/callback",
+        },
+        http_post=fake_post,
+    )
+
+    values = read_env_values()
+    assert result["ok"] is True
+    assert captured["url"] == "https://api.x.com/2/oauth2/token"
+    assert captured["data"]["grant_type"] == "authorization_code"
+    assert captured["data"]["code"] == "auth-code-123"
+    assert captured["data"]["code_verifier"] == "verifier-123"
+    assert "Authorization" in captured["headers"]
+    assert values["X_OAUTH2_ACCESS_TOKEN"] == "new-user-access-token"
+    assert values["X_OAUTH2_REFRESH_TOKEN"] == "new-user-refresh-token"
+    assert "new-user-access-token" not in str(read_log_events())
+
+
 def test_x_connection_uses_oauth2_users_me():
     calls = []
 
@@ -371,6 +432,7 @@ def test_post_approved_tweet_oauth1_permission_error_has_guidance(monkeypatch):
             "consumer_secret": "consumer-secret",
             "access_token": "access-token",
             "access_token_secret": "access-token-secret",
+            "allow_oauth1_fallback": True,
         })
 
     message = str(exc.value)
@@ -408,6 +470,7 @@ def test_post_approved_tweet_falls_back_to_oauth1_when_oauth2_fails(monkeypatch)
         "consumer_secret": "consumer-secret",
         "access_token": "access-token",
         "access_token_secret": "access-token-secret",
+        "allow_oauth1_fallback": True,
         "http_post": fake_post,
     })
 
@@ -416,3 +479,29 @@ def test_post_approved_tweet_falls_back_to_oauth1_when_oauth2_fails(monkeypatch)
     assert oauth2_calls
     assert oauth1_calls == [{"text": item["draft"]}]
     assert any(event["event"] == "x_post_oauth2_failed_oauth1_fallback" for event in read_log_events())
+
+
+def test_post_approved_tweet_blocks_oauth1_fallback_by_default(monkeypatch):
+    import tweepy
+
+    save_feature_flags({"ENABLE_X_WRITE": True, "REQUIRE_HUMAN_APPROVAL": True})
+    item = generate_draft("x_post", "Governed decisions need human accountability.")
+    approve_item(item["id"])
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            raise AssertionError("OAuth 1.0a client should not be used unless fallback is explicitly allowed.")
+
+    monkeypatch.setattr(tweepy, "Client", FakeClient)
+
+    with pytest.raises(RuntimeError) as exc:
+        post_approved_tweet(item["id"], {
+            "consumer_key": "consumer-key",
+            "consumer_secret": "consumer-secret",
+            "access_token": "access-token",
+            "access_token_secret": "access-token-secret",
+        })
+
+    message = str(exc.value)
+    assert "OAuth 2.0 user-context tokens" in message
+    assert "X_ALLOW_OAUTH1_POSTING_FALLBACK=true" in message

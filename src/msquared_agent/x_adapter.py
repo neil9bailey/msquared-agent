@@ -1,7 +1,8 @@
-import os
 import base64
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import requests
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
@@ -33,6 +34,12 @@ APP_BEARER_UNAUTHORIZED_HELP = (
     "X API returned 401 Unauthorized for the app-only credential. Copy the current app-only value from "
     "the X Developer Portal App-Only Authentication section into the app-only field in Admin, then save settings. "
     "If you regenerated the app-only credential in X, the old value in .env is immediately invalid."
+)
+DEFAULT_OAUTH2_SCOPES = ("tweet.read", "tweet.write", "users.read", "offline.access")
+OAUTH1_FALLBACK_HELP = (
+    "X posting needs OAuth 2.0 user-context tokens by default. Save X_OAUTH2_ACCESS_TOKEN and "
+    "X_OAUTH2_REFRESH_TOKEN in Admin, or use Generate OAuth 2 Tokens. OAuth 1.0a posting fallback is disabled "
+    "unless X_ALLOW_OAUTH1_POSTING_FALLBACK=true because X often rejects old OAuth 1.0a access tokens for /2/tweets."
 )
 
 
@@ -273,6 +280,13 @@ def _has_oauth1_user_credentials(config: dict) -> bool:
     ])
 
 
+def _oauth1_posting_fallback_allowed(config: dict) -> bool:
+    explicit = config.get("allow_oauth1_fallback")
+    if explicit is not None:
+        return str(explicit).strip().lower() in {"1", "true", "yes", "on"}
+    return str(get_env("X_ALLOW_OAUTH1_POSTING_FALLBACK", "false")).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _is_unauthorized(exc: Exception) -> bool:
     return _http_status(exc) == 401 or "401" in str(exc)
 
@@ -401,6 +415,134 @@ def _post_tweet_with_oauth2(payload_json: dict, access_token: str, http_post=Non
     return payload.get("data") or payload
 
 
+def build_oauth2_authorization_url(config: dict | None = None, scopes: tuple[str, ...] | None = None) -> dict:
+    """Create an X OAuth 2.0 authorization URL using PKCE.
+
+    The desktop app cannot safely receive a public callback on every machine, so
+    the operator pastes the final redirected URL or authorization code back into
+    the Admin UI. The callback URI still must exactly match the X Developer
+    Portal setting.
+    """
+    config = config or {}
+    load_env_file()
+    client_id = config.get("client_id") or get_env("X_CLIENT_ID")
+    redirect_uri = config.get("callback_uri") or get_env("X_CALLBACK_URI")
+    if not client_id:
+        raise ValueError("X_CLIENT_ID is required before generating OAuth 2.0 tokens.")
+    if not redirect_uri:
+        raise ValueError("X_CALLBACK_URI is required and must match the callback URL in the X Developer Portal.")
+
+    code_verifier = secrets.token_urlsafe(64)[:128]
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    state = secrets.token_urlsafe(24)
+    scope = " ".join(scopes or DEFAULT_OAUTH2_SCOPES)
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": scope,
+        "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+    }
+    return {
+        "authorization_url": f"https://twitter.com/i/oauth2/authorize?{urlencode(params)}",
+        "code_verifier": code_verifier,
+        "state": state,
+        "redirect_uri": redirect_uri,
+        "scope": scope,
+    }
+
+
+def exchange_oauth2_authorization_code(code_or_url: str, code_verifier: str, state: str = "", config: dict | None = None, http_post=None) -> dict:
+    config = config or {}
+    load_env_file()
+    client_id = config.get("client_id") or get_env("X_CLIENT_ID")
+    client_secret = config.get("client_secret") or get_env("X_CLIENT_SECRET")
+    redirect_uri = config.get("callback_uri") or get_env("X_CALLBACK_URI")
+    if not client_id:
+        raise ValueError("X_CLIENT_ID is required to exchange an OAuth 2.0 authorization code.")
+    if not redirect_uri:
+        raise ValueError("X_CALLBACK_URI is required to exchange an OAuth 2.0 authorization code.")
+    if not code_verifier:
+        raise ValueError("OAuth 2.0 code verifier is missing. Start the token generation flow again.")
+
+    code = _extract_oauth2_authorization_code(code_or_url, state)
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "code_verifier": code_verifier,
+    }
+    if client_secret:
+        credentials = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
+        headers["Authorization"] = f"Basic {credentials}"
+    else:
+        data["client_id"] = client_id
+
+    response = _x_post_with_retry(
+        http_post or requests.post,
+        "https://api.x.com/2/oauth2/token",
+        headers=headers,
+        data=data,
+        timeout=20,
+    )
+    payload = response.json()
+    saved = _save_oauth2_token_payload(payload)
+    log_event(
+        "x_oauth2_tokens_authorized",
+        "info",
+        "OAuth 2.0 access and refresh tokens generated and saved.",
+        {"expires_at": saved["expires_at"], "scope_configured": bool(saved["scope"])},
+    )
+    return {"ok": True, "expires_at": saved["expires_at"], "scope": saved["scope"]}
+
+
+def _extract_oauth2_authorization_code(code_or_url: str, expected_state: str = "") -> str:
+    raw = str(code_or_url or "").strip()
+    if not raw:
+        raise ValueError("Paste the full redirected URL or OAuth 2.0 authorization code.")
+    parsed = urlparse(raw)
+    query = parse_qs(parsed.query)
+    if query:
+        error = query.get("error", [""])[0]
+        if error:
+            description = query.get("error_description", [""])[0]
+            raise RuntimeError(f"X OAuth 2.0 authorization failed: {error}. {description}".strip())
+        returned_state = query.get("state", [""])[0]
+        if expected_state and returned_state and returned_state != expected_state:
+            raise RuntimeError("X OAuth 2.0 state mismatch. Start token generation again from Admin.")
+        code = query.get("code", [""])[0]
+        if not code:
+            raise ValueError("The pasted redirected URL did not contain an OAuth 2.0 code.")
+        return code
+    return raw
+
+
+def _save_oauth2_token_payload(payload: dict) -> dict:
+    access_token = payload.get("access_token")
+    if not access_token:
+        raise RuntimeError("OAuth 2.0 token response did not include an access token.")
+
+    expires_at = ""
+    if payload.get("expires_in"):
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(payload["expires_in"]))).isoformat()
+
+    saved_values = {
+        "X_OAUTH2_ACCESS_TOKEN": access_token,
+        "X_OAUTH2_REFRESH_TOKEN": payload.get("refresh_token") or get_env("X_OAUTH2_REFRESH_TOKEN") or "",
+        "X_OAUTH2_ACCESS_TOKEN_EXPIRES_AT": expires_at,
+        "X_OAUTH2_SCOPE": payload.get("scope", ""),
+    }
+    save_env_values(saved_values)
+    return {
+        "expires_at": expires_at,
+        "scope": saved_values["X_OAUTH2_SCOPE"],
+    }
+
+
 def refresh_oauth2_access_token(config: dict | None = None) -> str:
     config = config or {}
     refresh_token = config.get("oauth2_refresh_token") or get_env("X_OAUTH2_REFRESH_TOKEN")
@@ -430,26 +572,13 @@ def refresh_oauth2_access_token(config: dict | None = None) -> str:
         timeout=20,
     )
     payload = response.json()
+    saved = _save_oauth2_token_payload({**payload, "refresh_token": payload.get("refresh_token") or refresh_token})
     access_token = payload.get("access_token")
-    if not access_token:
-        raise RuntimeError("OAuth 2.0 refresh response did not include an access token.")
-
-    expires_at = ""
-    if payload.get("expires_in"):
-        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(payload["expires_in"]))).isoformat()
-
-    saved_values = {
-        "X_OAUTH2_ACCESS_TOKEN": access_token,
-        "X_OAUTH2_REFRESH_TOKEN": payload.get("refresh_token") or refresh_token,
-        "X_OAUTH2_ACCESS_TOKEN_EXPIRES_AT": expires_at,
-        "X_OAUTH2_SCOPE": payload.get("scope", ""),
-    }
-    save_env_values(saved_values)
     log_event(
         "x_oauth2_token_refreshed",
         "info",
         "OAuth 2.0 access token refreshed and saved.",
-        {"expires_at": expires_at, "scope_configured": bool(saved_values["X_OAUTH2_SCOPE"])},
+        {"expires_at": saved["expires_at"], "scope_configured": bool(saved["scope"])},
     )
     return access_token
 
@@ -610,6 +739,8 @@ def _x_post_failure_message(exc: Exception, auth_mode: str) -> str:
     status = _http_status(exc)
     detail = _x_error_detail(exc) or str(exc)
     detail_suffix = f" Provider detail: {detail}" if detail else ""
+    if auth_mode in {"oauth1a_user_unverified", "missing"} and isinstance(exc, PermissionError):
+        return str(exc)
     if auth_mode == "oauth1a_user" and status == 403:
         return (
             "X post failed with OAuth 1.0a app permissions. The app or OAuth 1.0a access token is not write-enabled "
@@ -742,6 +873,9 @@ def post_approved_tweet(item_id: str, client_config: dict | None = None):
                     )
 
         if not (oauth2_access_token or _has_oauth2_refresh_token(config)) or oauth2_error:
+            if not _oauth1_posting_fallback_allowed(config):
+                auth_mode = "oauth1a_user_unverified" if _has_oauth1_user_credentials(config) else "missing"
+                raise PermissionError(OAUTH1_FALLBACK_HELP)
             auth_mode = "oauth1a_user"
             import tweepy
 

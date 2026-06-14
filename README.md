@@ -88,7 +88,7 @@ The X section uses the same wording as the X Developer Portal: Client ID, Client
 
 For X monitoring, enter the **App Bearer Token** and the numeric MSquared user id. Read monitoring uses the app-only Bearer token first, which avoids stale OAuth 2.0 user access tokens breaking feed refreshes.
 
-For X OAuth 2.0 user-context posting, Client ID and Client Secret are not enough by themselves. Use X's **Generate an access token and refresh token** action, then enter the generated **OAuth 2.0 Access Token** and **OAuth 2.0 Refresh Token** in Admin. The app can refresh OAuth 2.0 user tokens when X returns an unauthorized response. OAuth 1.0a Consumer/Access Token fields remain available as the posting fallback, provided the Access Token was generated after the app permissions were set to **Read and write** or **Read and write and Direct message**.
+For X OAuth 2.0 user-context posting, Client ID and Client Secret are not enough by themselves. Use **Generate OAuth 2 Tokens** in Admin to open X's consent screen, authorize the MSquared account, paste the final redirected URL/code, and let the app save `X_OAUTH2_ACCESS_TOKEN` and `X_OAUTH2_REFRESH_TOKEN`. The configured callback URI must exactly match the X Developer Portal callback URL. The app can refresh OAuth 2.0 user tokens when X returns an unauthorized response. OAuth 1.0a Consumer/Access Token fields remain available only as an explicit fallback when `X_ALLOW_OAUTH1_POSTING_FALLBACK=true`, provided the Access Token was regenerated after the app permissions were set to **Read and write** or **Read and write and Direct message**.
 
 The **AI Agent** fields are optional. Without `OPENAI_API_KEY`, the Agent tab uses the local governed fallback. With `OPENAI_API_KEY` and `OPENAI_MODEL`, the Agent tab uses OpenAI's Responses API for interactive operator chat and OpenAI-backed draft creation while still creating drafts only through the approval queue. The default model is `gpt-5.4-mini-2026-03-17`; if OpenAI returns an authorization, model-access, quota, or network error, the Agent logs the reason and creates a local governed fallback draft instead of blocking the approval workflow.
 
@@ -149,19 +149,23 @@ Fix sequence:
 5. Click **Test X Connection**, then refresh X once the test passes.
 
 ## Troubleshooting X 403 OAuth 1.0a App Permissions
-If posting fails with `Your client app is not configured with the appropriate oauth1 app permissions for this endpoint`, the app has fallen back to OAuth 1.0a credentials and X is rejecting them for `/2/tweets`.
+If posting fails with `Your client app is not configured with the appropriate oauth1 app permissions for this endpoint`, the app has fallen back to OAuth 1.0a credentials and X is rejecting them for `/2/tweets`. New builds block this earlier in preflight unless OAuth 1.0a fallback has been explicitly enabled.
 
 Preferred fix:
 
-1. Save both `X_OAUTH2_ACCESS_TOKEN` and `X_OAUTH2_REFRESH_TOKEN` in **Settings -> Admin**.
-2. Confirm **Readiness & Paths** shows `write_auth_mode` as `oauth2_user`.
-3. Approve the draft again and post.
+1. In **Settings -> Admin**, confirm `X_CLIENT_ID`, `X_CLIENT_SECRET`, and `X_CALLBACK_URI` are filled in.
+2. Click **Generate OAuth 2 Tokens**.
+3. Authorize the MSquared X account in the browser.
+4. Paste the final redirected URL or `code` value back into the prompt.
+5. Confirm **Readiness & Paths** shows `write_auth_mode` as `oauth2_user`.
+6. Run **Test X Connection**, then preflight and post the approved draft again.
 
 Fallback fix:
 
 1. In the X Developer Portal, set app permissions to **Read and write**.
 2. Regenerate the OAuth 1.0a access token and access token secret after the permission change.
 3. Save the new OAuth 1.0a values in **Settings -> Admin**.
+4. Set `X_ALLOW_OAUTH1_POSTING_FALLBACK=true` only if you deliberately want the app to try OAuth 1.0a posting.
 
 ## Diagnostics and logs
 Open **Diagnostics** in the desktop console to inspect:

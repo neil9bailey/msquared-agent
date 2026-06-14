@@ -1,9 +1,11 @@
 from msquared_agent.action_preflight import run_action_preflight
 from msquared_agent.agent import generate_draft
 from msquared_agent.approval_queue import approve_item, update_approval_item
+from msquared_agent.env_loader import save_env_values
 from msquared_agent.feedback_store import read_feedback, similar_approved_examples
 from msquared_agent.intake_store import add_intake_item
 from msquared_agent.legal_agent import review_approval_item
+from msquared_agent.settings import save_feature_flags
 
 
 def test_intake_assigns_canonical_ids_and_deduplicates_sources():
@@ -65,6 +67,11 @@ def test_legal_review_only_changes_clear_claim_boundary_issues():
 
 
 def test_preflight_blocks_unapproved_then_passes_approved_x_reply():
+    save_feature_flags({"ENABLE_X_WRITE": True})
+    save_env_values({
+        "X_OAUTH2_ACCESS_TOKEN": "oauth2-user-token",
+        "X_OAUTH2_REFRESH_TOKEN": "oauth2-refresh-token",
+    })
     source = add_intake_item({
         "channel": "x",
         "source_type": "x_mention",

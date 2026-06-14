@@ -527,6 +527,12 @@ class MSquaredDesktopApp(tk.Tk):
         self._admin_entry(x_frame, 21, "OAuth 1.0a Access Token Secret", "X_ACCESS_TOKEN_SECRET", values, secret=True)
         self._admin_entry(x_frame, 22, "MSquared numeric X user id", "X_MONITOR_USER_ID", values)
         self._admin_entry(x_frame, 23, "Monitor query", "X_MONITOR_QUERY", values)
+        x_hint = (
+            "Read monitoring uses the App Bearer Token first. OAuth 2.0 Client ID/Secret alone are not API tokens; "
+            "use X's Generate access token and refresh token action only when you want OAuth 2.0 user-context posting. "
+            "OAuth 1.0a Access Token can be used as the posting fallback after it is regenerated with Read and write permissions."
+        )
+        ttk.Label(x_frame, text=x_hint, wraplength=500).grid(row=24, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         email_frame = ttk.LabelFrame(parent, text="Email Connector", padding=10)
         email_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 8))

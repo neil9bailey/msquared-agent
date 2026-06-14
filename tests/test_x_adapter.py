@@ -74,6 +74,29 @@ def test_x_monitor_numeric_id_skips_handle_resolution():
     assert calls == ["https://api.x.com/2/users/2065865497237729280/mentions"]
 
 
+def test_x_feed_prefers_app_bearer_over_stale_oauth2_token():
+    save_feature_flags({"ENABLE_X_READ": True})
+    calls = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append({"url": url, "headers": headers})
+        assert headers["Authorization"] == "Bearer app-bearer-token"
+        return FakeResponse({"data": []}, url=url)
+
+    fetch_x_feed({
+        "bearer_token": "app-bearer-token",
+        "oauth2_access_token": "stale-oauth2-token",
+        "monitor_user_id": "2065865497237729280",
+        "query": "",
+        "http_get": fake_get,
+    })
+
+    assert calls == [{
+        "url": "https://api.x.com/2/users/2065865497237729280/mentions",
+        "headers": {"Authorization": "Bearer app-bearer-token"},
+    }]
+
+
 def test_x_feed_retries_transient_mention_failure():
     save_feature_flags({"ENABLE_X_READ": True})
     calls = []
@@ -125,6 +148,32 @@ def test_x_unauthorized_logs_actionable_message():
     assert "user-context token" in failure["message"]
     assert "offline.access" in failure["message"]
     assert "Token has expired" in failure["message"]
+
+
+def test_x_app_bearer_unauthorized_logs_bearer_guidance():
+    save_feature_flags({"ENABLE_X_READ": True})
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        return FakeResponse(
+            {"title": "Unauthorized", "detail": "Invalid bearer token."},
+            status_code=401,
+            url=url,
+        )
+
+    items = fetch_x_feed({
+        "bearer_token": "invalid-app-bearer",
+        "monitor_user_id": "2065865497237729280",
+        "query": "",
+        "http_get": fake_get,
+    })
+
+    events = read_log_events()
+    failure = next(event for event in events if event["event"] == "x_fetch_failed")
+    assert items == []
+    assert failure["details"]["http_status"] == 401
+    assert "app-only credential" in failure["message"]
+    assert "OAuth 2.0 access token is a user-context token" not in failure["message"]
+    assert "Invalid bearer" in failure["message"]
 
 
 def test_x_search_payment_required_logs_partial_warning_after_mentions():
@@ -228,6 +277,26 @@ def test_x_connection_uses_oauth2_users_me():
     assert calls[0]["headers"]["Authorization"] == "Bearer test-token"
 
 
+def test_x_connection_prefers_app_bearer_for_read_validation():
+    calls = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append({"url": url, "headers": headers})
+        assert headers["Authorization"] == "Bearer app-bearer-token"
+        return FakeResponse({"data": {"id": "2065274277448835072", "username": "MSQUARED_2026"}}, url=url)
+
+    result = run_x_connection_test({
+        "bearer_token": "app-bearer-token",
+        "oauth2_access_token": "stale-oauth2-token",
+        "monitor_user_id": "2065274277448835072",
+        "http_get": fake_get,
+    })
+
+    assert result["ok"] is True
+    assert result["auth_mode"] == "app_bearer"
+    assert calls[0]["url"] == "https://api.x.com/2/users/2065274277448835072"
+
+
 def test_x_connection_reports_401_guidance():
     def fake_get(url, params=None, headers=None, timeout=None):
         return FakeResponse(
@@ -308,3 +377,42 @@ def test_post_approved_tweet_oauth1_permission_error_has_guidance(monkeypatch):
     assert "OAuth 1.0a app permissions" in message
     assert "X_OAUTH2_ACCESS_TOKEN" in message
     assert "Read and write" in message
+
+
+def test_post_approved_tweet_falls_back_to_oauth1_when_oauth2_fails(monkeypatch):
+    import tweepy
+
+    save_feature_flags({"ENABLE_X_WRITE": True, "REQUIRE_HUMAN_APPROVAL": True})
+    item = generate_draft("x_post", "Governed decisions need human accountability.")
+    approve_item(item["id"])
+    oauth2_calls = []
+    oauth1_calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        oauth2_calls.append({"url": url, "headers": headers, "json": json})
+        return FakeResponse({"title": "Unauthorized", "detail": "Expired token."}, status_code=401, url=url)
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def create_tweet(self, **kwargs):
+            oauth1_calls.append(kwargs)
+            return type("Result", (), {"data": {"id": "tweet_123", "text": kwargs["text"]}})()
+
+    monkeypatch.setattr(tweepy, "Client", FakeClient)
+
+    result = post_approved_tweet(item["id"], {
+        "oauth2_access_token": "expired-oauth2-token",
+        "consumer_key": "consumer-key",
+        "consumer_secret": "consumer-secret",
+        "access_token": "access-token",
+        "access_token_secret": "access-token-secret",
+        "http_post": fake_post,
+    })
+
+    assert result["sent"] is True
+    assert result["auth_mode"] == "oauth1a_user"
+    assert oauth2_calls
+    assert oauth1_calls == [{"text": item["draft"]}]
+    assert any(event["event"] == "x_post_oauth2_failed_oauth1_fallback" for event in read_log_events())

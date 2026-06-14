@@ -86,7 +86,9 @@ The app asks for confirmation if you enable `ENABLE_X_WRITE` or `ENABLE_EMAIL_SE
 
 The X section uses the same wording as the X Developer Portal: Client ID, Client Secret, Bearer Token, Consumer Key, Consumer Key Secret, Access Token, Access Token Secret, App permissions, Type of App, callback URL, website URL, organization, Terms, and Privacy Policy.
 
-For X OAuth 2.0 user-context access, enter **OAuth 2.0 Access Token** and **OAuth 2.0 Refresh Token** in Admin. The app uses the OAuth 2.0 access token as a Bearer token for read/write calls and can refresh it with the refresh token when X returns an unauthorized response. OAuth 1.0a Consumer/Access Token fields remain available as fallback.
+For X monitoring, enter the **App Bearer Token** and the numeric MSquared user id. Read monitoring uses the app-only Bearer token first, which avoids stale OAuth 2.0 user access tokens breaking feed refreshes.
+
+For X OAuth 2.0 user-context posting, Client ID and Client Secret are not enough by themselves. Use X's **Generate an access token and refresh token** action, then enter the generated **OAuth 2.0 Access Token** and **OAuth 2.0 Refresh Token** in Admin. The app can refresh OAuth 2.0 user tokens when X returns an unauthorized response. OAuth 1.0a Consumer/Access Token fields remain available as the posting fallback, provided the Access Token was generated after the app permissions were set to **Read and write** or **Read and write and Direct message**.
 
 The **AI Agent** fields are optional. Without `OPENAI_API_KEY`, the Agent tab uses the local governed fallback. With `OPENAI_API_KEY` and `OPENAI_MODEL`, the Agent tab uses OpenAI's Responses API for interactive operator chat and OpenAI-backed draft creation while still creating drafts only through the approval queue. The default model is `gpt-5.4-mini`; if OpenAI returns an authorization, model-access, quota, or network error, the Agent logs the reason and creates a local governed fallback draft instead of blocking the approval workflow.
 

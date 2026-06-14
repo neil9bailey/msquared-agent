@@ -29,6 +29,11 @@ UNAUTHORIZED_HELP = (
     "permissions were set to Read and write; that the scopes include users.read, tweet.read, tweet.write, "
     "and offline.access; and that the refresh token is present so the app can renew expired access tokens."
 )
+APP_BEARER_UNAUTHORIZED_HELP = (
+    "X API returned 401 Unauthorized for the app-only credential. Copy the current app-only value from "
+    "the X Developer Portal App-Only Authentication section into the app-only field in Admin, then save settings. "
+    "If you regenerated the app-only credential in X, the old value in .env is immediately invalid."
+)
 
 
 def fetch_x_feed(config: dict | None = None) -> list:
@@ -69,13 +74,25 @@ def fetch_x_feed(config: dict | None = None) -> list:
         return items
 
     bearer_token = _x_api_bearer_token(config)
+    auth_mode = _x_read_auth_mode(config, bearer_token)
     query = config.get("query") if "query" in config else get_env("X_MONITOR_QUERY") or "DIIaC OR MSquared OR governed decision intelligence"
     monitor_user_id = config.get("monitor_user_id") if "monitor_user_id" in config else get_env("X_MONITOR_USER_ID")
+    if not bearer_token and _has_oauth2_refresh_token(config):
+        try:
+            bearer_token = refresh_oauth2_access_token(config)
+            auth_mode = "oauth2_user"
+        except Exception as exc:
+            log_event(
+                "x_oauth2_refresh_failed",
+                "warning",
+                "OAuth 2.0 token refresh failed before X refresh; app bearer or new generated user tokens are required.",
+                {"error": str(exc), "http_status": _http_status(exc)},
+            )
     if not bearer_token:
         log_event(
             "x_fetch_skipped",
             "warning",
-            "X API read is enabled but no OAuth 2.0 access token, refresh token, or app bearer token is configured.",
+            "X API read is enabled but no app bearer token, OAuth 2.0 access token, or refresh token is configured.",
             {"imported_count": len(items), "reason": "X OAuth token missing"},
         )
         log_action({
@@ -91,6 +108,7 @@ def fetch_x_feed(config: dict | None = None) -> list:
         mention_count, search_count, source_errors = _fetch_x_feed_with_token(
             items,
             bearer_token,
+            auth_mode,
             monitor_user_id,
             query,
             config,
@@ -119,6 +137,7 @@ def fetch_x_feed(config: dict | None = None) -> list:
                 mention_count, search_count, source_errors = _fetch_x_feed_with_token(
                     items,
                     refreshed_token,
+                    "oauth2_user",
                     monitor_user_id,
                     query,
                     config,
@@ -149,7 +168,7 @@ def fetch_x_feed(config: dict | None = None) -> list:
         log_event(
             "x_fetch_failed",
             "error",
-            _x_failure_message(exc),
+            _x_failure_message(exc, auth_mode=auth_mode),
             {"error": str(exc), "http_status": _http_status(exc), "imported_count": len(items)},
         )
         log_action({
@@ -162,7 +181,7 @@ def fetch_x_feed(config: dict | None = None) -> list:
     return items
 
 
-def _fetch_x_feed_with_token(items, bearer_token, monitor_user_id, query, config, http_get) -> tuple[int, int, list[dict]]:
+def _fetch_x_feed_with_token(items, bearer_token, auth_mode, monitor_user_id, query, config, http_get) -> tuple[int, int, list[dict]]:
     headers = {"Authorization": f"Bearer {bearer_token}"}
     mention_count = 0
     search_count = 0
@@ -184,7 +203,7 @@ def _fetch_x_feed_with_token(items, bearer_token, monitor_user_id, query, config
                 items.append(_add_x_tweet(tweet, "x_mention"))
                 mention_count += 1
         except Exception as exc:
-            source_errors.append({"source": "mentions", "exception": exc})
+            source_errors.append({"source": "mentions", "exception": exc, "auth_mode": auth_mode})
 
     if query:
         try:
@@ -203,7 +222,7 @@ def _fetch_x_feed_with_token(items, bearer_token, monitor_user_id, query, config
                 items.append(_add_x_tweet(tweet, "x_monitor"))
                 search_count += 1
         except Exception as exc:
-            source_errors.append({"source": "recent_search", "exception": exc})
+            source_errors.append({"source": "recent_search", "exception": exc, "auth_mode": auth_mode})
     return mention_count, search_count, source_errors
 
 
@@ -218,22 +237,40 @@ def _log_x_source_warnings(source_errors: list[dict]) -> None:
         log_event(
             "x_fetch_source_failed",
             "warning",
-            f"X {error['source']} source failed while other intake may still be available. {_x_failure_message(exc)}",
+            f"X {error['source']} source failed while other intake may still be available. {_x_failure_message(exc, auth_mode=error.get('auth_mode', ''))}",
             {"source": error["source"], "http_status": _http_status(exc), "error": str(exc)},
         )
 
 
 def _x_api_bearer_token(config: dict) -> str | None:
     return (
-        config.get("oauth2_access_token")
-        or get_env("X_OAUTH2_ACCESS_TOKEN")
-        or config.get("bearer_token")
+        config.get("bearer_token")
         or get_env("X_BEARER_TOKEN")
+        or config.get("oauth2_access_token")
+        or get_env("X_OAUTH2_ACCESS_TOKEN")
     )
+
+
+def _x_read_auth_mode(config: dict, token: str | None) -> str:
+    if not token:
+        return "missing"
+    app_bearer = config.get("bearer_token") or get_env("X_BEARER_TOKEN")
+    if app_bearer and token == app_bearer:
+        return "app_bearer"
+    return "oauth2_user"
 
 
 def _has_oauth2_refresh_token(config: dict) -> bool:
     return bool(config.get("oauth2_refresh_token") or get_env("X_OAUTH2_REFRESH_TOKEN"))
+
+
+def _has_oauth1_user_credentials(config: dict) -> bool:
+    return all([
+        config.get("consumer_key") or get_env("X_CONSUMER_KEY") or get_env("X_API_KEY"),
+        config.get("consumer_secret") or get_env("X_CONSUMER_SECRET") or get_env("X_API_SECRET"),
+        config.get("access_token") or get_env("X_ACCESS_TOKEN"),
+        config.get("access_token_secret") or get_env("X_ACCESS_TOKEN_SECRET"),
+    ])
 
 
 def _is_unauthorized(exc: Exception) -> bool:
@@ -255,12 +292,13 @@ def _http_status(exc: Exception) -> int | None:
     return None
 
 
-def _x_failure_message(exc: Exception) -> str:
+def _x_failure_message(exc: Exception, auth_mode: str = "") -> str:
     if _http_status(exc) == 402:
         return PAYMENT_REQUIRED_HELP
     if _http_status(exc) == 401:
         detail = _x_error_detail(exc)
-        return f"{UNAUTHORIZED_HELP} Provider detail: {detail}" if detail else UNAUTHORIZED_HELP
+        help_text = APP_BEARER_UNAUTHORIZED_HELP if auth_mode == "app_bearer" else UNAUTHORIZED_HELP
+        return f"{help_text} Provider detail: {detail}" if detail else help_text
     if _http_status(exc) == 403:
         return "X refresh failed with 403 Forbidden. Check X app permissions, OAuth scopes, and endpoint access."
     if _http_status(exc) == 429:
@@ -455,6 +493,47 @@ def test_x_connection(config: dict | None = None) -> dict:
     monitor_user_id = config.get("monitor_user_id") if "monitor_user_id" in config else get_env("X_MONITOR_USER_ID")
     checks = []
 
+    if app_bearer_token:
+        auth_mode = "app_bearer"
+        headers = {"Authorization": f"Bearer {app_bearer_token}"}
+        if not monitor_user_id:
+            message = "App bearer token is configured, but no X_MONITOR_USER_ID is set for a read-only validation call."
+            log_event("x_connection_test_failed", "warning", message, {"auth_mode": auth_mode})
+            return {"ok": False, "auth_mode": auth_mode, "message": message, "http_status": None, "checks": checks}
+        try:
+            resolved_user_id = _resolve_x_user_id(monitor_user_id, headers, http_get)
+            response = _x_get_with_retry(
+                http_get,
+                f"{X_API_BASE}/2/users/{resolved_user_id}",
+                params={"user.fields": "id,username"},
+                headers=headers,
+                timeout=20,
+            )
+            data = response.json().get("data") or {}
+            checks.append({
+                "name": "monitor_user_lookup",
+                "ok": True,
+                "user_id": str(data.get("id") or resolved_user_id),
+                "username": str(data.get("username", "")),
+            })
+            log_event("x_connection_test_complete", "info", "X app bearer connection test completed.", {"auth_mode": auth_mode})
+            return {
+                "ok": True,
+                "auth_mode": auth_mode,
+                "message": f"X app bearer token can read the monitor user {data.get('username') or resolved_user_id}.",
+                "http_status": 200,
+                "checks": checks,
+            }
+        except Exception as exc:
+            if not oauth2_access_token and not _has_oauth2_refresh_token(config):
+                return _x_connection_result(False, auth_mode, checks, exc)
+            checks.append({
+                "name": "app_bearer_read",
+                "ok": False,
+                "http_status": _http_status(exc),
+                "message": _x_failure_message(exc, auth_mode=auth_mode),
+            })
+
     if not oauth2_access_token and _has_oauth2_refresh_token(config):
         oauth2_access_token = refresh_oauth2_access_token(config)
         checks.append({"name": "oauth2_refresh", "ok": True})
@@ -503,47 +582,13 @@ def test_x_connection(config: dict | None = None) -> dict:
             "checks": checks,
         }
 
-    if app_bearer_token:
-        auth_mode = "app_bearer"
-        headers = {"Authorization": f"Bearer {app_bearer_token}"}
-        if not monitor_user_id:
-            message = "App bearer token is configured, but no X_MONITOR_USER_ID is set for a read-only validation call."
-            log_event("x_connection_test_failed", "warning", message, {"auth_mode": auth_mode})
-            return {"ok": False, "auth_mode": auth_mode, "message": message, "http_status": None, "checks": checks}
-        try:
-            resolved_user_id = _resolve_x_user_id(monitor_user_id, headers, http_get)
-            response = _x_get_with_retry(
-                http_get,
-                f"{X_API_BASE}/2/users/{resolved_user_id}",
-                params={"user.fields": "id,username"},
-                headers=headers,
-                timeout=20,
-            )
-            data = response.json().get("data") or {}
-            checks.append({
-                "name": "monitor_user_lookup",
-                "ok": True,
-                "user_id": str(data.get("id") or resolved_user_id),
-                "username": str(data.get("username", "")),
-            })
-            log_event("x_connection_test_complete", "info", "X app bearer connection test completed.", {"auth_mode": auth_mode})
-            return {
-                "ok": True,
-                "auth_mode": auth_mode,
-                "message": f"X app bearer token can read the monitor user {data.get('username') or resolved_user_id}.",
-                "http_status": 200,
-                "checks": checks,
-            }
-        except Exception as exc:
-            return _x_connection_result(False, auth_mode, checks, exc)
-
     message = "No X OAuth 2.0 access token, refresh token, or app bearer token is configured."
     log_event("x_connection_test_failed", "warning", message, {"auth_mode": "missing"})
     return {"ok": False, "auth_mode": "missing", "message": message, "http_status": None, "checks": checks}
 
 
 def _x_connection_result(ok: bool, auth_mode: str, checks: list[dict], exc: Exception) -> dict:
-    message = _x_failure_message(exc)
+    message = _x_failure_message(exc, auth_mode=auth_mode)
     result = {
         "ok": ok,
         "auth_mode": auth_mode,
@@ -670,18 +715,33 @@ def post_approved_tweet(item_id: str, client_config: dict | None = None):
         config = client_config or {}
         http_post = config.get("http_post") or requests.post
         oauth2_access_token = config.get("oauth2_access_token") or get_env("X_OAUTH2_ACCESS_TOKEN")
+        oauth2_error = None
         if oauth2_access_token or _has_oauth2_refresh_token(config):
             auth_mode = "oauth2_user"
-            if not oauth2_access_token:
-                oauth2_access_token = refresh_oauth2_access_token(config)
             try:
+                if not oauth2_access_token:
+                    oauth2_access_token = refresh_oauth2_access_token(config)
                 result_data = _post_tweet_with_oauth2(payload["json"], oauth2_access_token, http_post)
             except Exception as exc:
-                if not _is_unauthorized(exc) or not _has_oauth2_refresh_token(config):
-                    raise
-                oauth2_access_token = refresh_oauth2_access_token(config)
-                result_data = _post_tweet_with_oauth2(payload["json"], oauth2_access_token, http_post)
-        else:
+                oauth2_error = exc
+                if _is_unauthorized(exc) and _has_oauth2_refresh_token(config):
+                    try:
+                        oauth2_access_token = refresh_oauth2_access_token(config)
+                        result_data = _post_tweet_with_oauth2(payload["json"], oauth2_access_token, http_post)
+                        oauth2_error = None
+                    except Exception as refresh_exc:
+                        oauth2_error = refresh_exc
+                if oauth2_error and not _has_oauth1_user_credentials(config):
+                    raise oauth2_error
+                if oauth2_error:
+                    log_event(
+                        "x_post_oauth2_failed_oauth1_fallback",
+                        "warning",
+                        "OAuth 2.0 X post failed; falling back to OAuth 1.0a user credentials.",
+                        {"approval_item_id": item_id, "http_status": _http_status(oauth2_error), "error": _x_post_failure_message(oauth2_error, auth_mode)},
+                    )
+
+        if not (oauth2_access_token or _has_oauth2_refresh_token(config)) or oauth2_error:
             auth_mode = "oauth1a_user"
             import tweepy
 

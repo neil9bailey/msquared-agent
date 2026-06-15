@@ -25,6 +25,21 @@ from msquared_agent.text_hygiene import display_excerpt, product_excerpt
 from msquared_agent.x_adapter import build_oauth2_authorization_url, exchange_oauth2_authorization_code, fetch_x_feed, post_approved_tweet, test_x_connection
 
 
+DEFAULT_X_APP_VALUES = {
+    "X_CALLBACK_URI": "https://diiac.io/oauth/x/callback",
+    "X_WEBSITE_URL": "https://diiac.io",
+    "X_ORGANIZATION_NAME": "DIIaC Ltd",
+    "X_ORGANIZATION_URL": "https://diiac.io",
+    "X_TERMS_URL": "https://diiac.io/terms",
+    "X_PRIVACY_URL": "https://diiac.io/privacy",
+}
+
+
+def _default_if_blank(values: dict, key: str, default: str) -> None:
+    if not str(values.get(key, "")).strip():
+        values[key] = default
+
+
 class MSquaredDesktopApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -487,6 +502,8 @@ class MSquaredDesktopApp(tk.Tk):
         values.setdefault("X_APP_TYPE", "Web App, Automated App or Bot")
         values.setdefault("X_REQUEST_EMAIL_FROM_USERS", "false")
         values.setdefault("X_ALLOW_OAUTH1_POSTING_FALLBACK", "false")
+        for key, default in DEFAULT_X_APP_VALUES.items():
+            _default_if_blank(values, key, default)
         values.setdefault("EMAIL_IMAP_SERVER", "imap.porkbun.com")
         values.setdefault("EMAIL_IMAP_PORT", "993")
         values.setdefault("EMAIL_IMAP_SECURITY", "SSL/TLS")
@@ -690,7 +707,7 @@ class MSquaredDesktopApp(tk.Tk):
         return {
             "client_id": value("X_CLIENT_ID"),
             "client_secret": value("X_CLIENT_SECRET"),
-            "callback_uri": value("X_CALLBACK_URI"),
+            "callback_uri": value("X_CALLBACK_URI") or DEFAULT_X_APP_VALUES["X_CALLBACK_URI"],
         }
 
     def generate_x_oauth2_tokens(self):
@@ -1607,6 +1624,8 @@ class MSquaredDesktopApp(tk.Tk):
         values.setdefault("X_APP_TYPE", "Web App, Automated App or Bot")
         values.setdefault("X_REQUEST_EMAIL_FROM_USERS", "false")
         values.setdefault("X_ALLOW_OAUTH1_POSTING_FALLBACK", "false")
+        for key, default in DEFAULT_X_APP_VALUES.items():
+            _default_if_blank(values, key, default)
         values.setdefault("EMAIL_IMAP_SERVER", "imap.porkbun.com")
         values.setdefault("EMAIL_IMAP_PORT", "993")
         values.setdefault("EMAIL_IMAP_SECURITY", "SSL/TLS")

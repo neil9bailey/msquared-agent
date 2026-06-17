@@ -725,7 +725,6 @@ class MSquaredDesktopApp(tk.Tk):
             self.pending_x_oauth2_flow = flow
             self.clipboard_clear()
             self.clipboard_append(flow["authorization_url"])
-            webbrowser.open(flow["authorization_url"])
             log_event("x_oauth2_authorization_started", "info", "X OAuth 2.0 authorization URL opened.", {"scope": flow["scope"]})
         except Exception as exc:
             log_event("x_oauth2_authorization_start_failed", "error", "Could not start X OAuth 2.0 authorization.", {"error": str(exc)})
@@ -733,24 +732,81 @@ class MSquaredDesktopApp(tk.Tk):
             self.refresh_diagnostics()
             return
 
-        pasted = simpledialog.askstring(
-            "Paste X redirect",
-            "The X authorization URL opened in your browser and was copied to the clipboard.\n\n"
-            "Use a browser/profile already logged in as @MSQUARED_2026. If X says you must be logged in, sign in, "
-            "then paste the copied authorization URL into that same logged-in tab again.\n\n"
-            "After authorizing, paste the final redirected URL or the code value here:",
-        )
-        if not pasted:
-            self.status_text.set("X OAuth 2 token generation started but no code was pasted.")
-            return
+        self._show_x_oauth2_wizard(flow, config)
+        webbrowser.open(flow["authorization_url"])
 
-        try:
-            result = exchange_oauth2_authorization_code(
-                pasted,
-                flow["code_verifier"],
-                flow["state"],
-                config,
-            )
+    def _show_x_oauth2_wizard(self, flow: dict, config: dict):
+        wizard = tk.Toplevel(self)
+        wizard.title("Generate X OAuth 2 Tokens")
+        wizard.geometry("780x560")
+        wizard.minsize(620, 440)
+        wizard.columnconfigure(0, weight=1)
+        wizard.rowconfigure(3, weight=1)
+
+        intro = (
+            "Step 1. The authorization URL is copied below and opened in your browser.\n"
+            "Step 2. Sign in to X as @MSQUARED_2026 if needed.\n"
+            "Step 3. Authorize the app.\n"
+            "Step 4. Copy the final browser address that starts with https://diiac.io/oauth/x/callback and contains code=.\n"
+            "Step 5. Paste that final address, or just the code value, into the box below and save.\n\n"
+            "Do not paste the x.com/i/oauth2/authorize URL into the final box. That is only the start URL."
+        )
+        ttk.Label(wizard, text=intro, wraplength=740, justify=tk.LEFT).grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+
+        url_box = tk.Text(wizard, height=4, wrap=tk.WORD, font=("Consolas", 9))
+        url_box.grid(row=1, column=0, sticky="ew", padx=12)
+        url_box.insert("1.0", flow["authorization_url"])
+        url_box.configure(state=tk.DISABLED)
+
+        url_actions = ttk.Frame(wizard)
+        url_actions.grid(row=2, column=0, sticky="ew", padx=12, pady=8)
+
+        def copy_auth_url():
+            self.clipboard_clear()
+            self.clipboard_append(flow["authorization_url"])
+            self.status_text.set("X authorization URL copied. Open it in the browser profile logged in as @MSQUARED_2026.")
+
+        def open_auth_url():
+            copy_auth_url()
+            webbrowser.open(flow["authorization_url"])
+
+        ttk.Button(url_actions, text="Copy Authorization URL", command=copy_auth_url).pack(side=tk.LEFT)
+        ttk.Button(url_actions, text="Open Authorization URL", command=open_auth_url).pack(side=tk.LEFT, padx=(8, 0))
+
+        paste_frame = ttk.LabelFrame(wizard, text="Paste Final Redirect URL Or Code", padding=8)
+        paste_frame.grid(row=3, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        paste_frame.columnconfigure(0, weight=1)
+        paste_frame.rowconfigure(1, weight=1)
+        ttk.Label(
+            paste_frame,
+            text="Expected final URL format: https://diiac.io/oauth/x/callback?state=...&code=...",
+            wraplength=720,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        paste_box = tk.Text(paste_frame, height=8, wrap=tk.WORD, font=("Consolas", 9), undo=True)
+        paste_box.grid(row=1, column=0, sticky="nsew")
+
+        actions = ttk.Frame(wizard)
+        actions.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 12))
+
+        def exchange_and_save():
+            pasted = paste_box.get("1.0", tk.END).strip()
+            if not pasted:
+                messagebox.showinfo("Paste final redirect", "Paste the final redirected URL containing code=, or paste the raw code value.", parent=wizard)
+                return
+            try:
+                result = exchange_oauth2_authorization_code(
+                    pasted,
+                    flow["code_verifier"],
+                    flow["state"],
+                    config,
+                )
+            except Exception as exc:
+                log_event("x_oauth2_authorization_exchange_failed", "error", "X OAuth 2.0 authorization code exchange failed.", {"error": str(exc)})
+                messagebox.showerror("OAuth 2 exchange failed", str(exc), parent=wizard)
+                self.status_text.set("X OAuth 2 token generation failed. See Diagnostics.")
+                self.refresh_diagnostics()
+                return
+
             values = read_env_values()
             for key in ("X_OAUTH2_ACCESS_TOKEN", "X_OAUTH2_REFRESH_TOKEN", "X_OAUTH2_ACCESS_TOKEN_EXPIRES_AT", "X_OAUTH2_SCOPE"):
                 if key in self.admin_vars:
@@ -758,16 +814,19 @@ class MSquaredDesktopApp(tk.Tk):
             self.pending_x_oauth2_flow = None
             self.refresh_connector_status()
             self.refresh_diagnostics()
+            wizard.destroy()
             messagebox.showinfo(
                 "OAuth 2 tokens saved",
                 "X OAuth 2 user-context tokens were saved. Run Test X Connection, then preflight the approved draft again.",
             )
             self.status_text.set(f"X OAuth 2 tokens saved. Scope: {result.get('scope') or 'not returned by X'}.")
-        except Exception as exc:
-            log_event("x_oauth2_authorization_exchange_failed", "error", "X OAuth 2.0 authorization code exchange failed.", {"error": str(exc)})
-            messagebox.showerror("OAuth 2 exchange failed", str(exc))
-            self.status_text.set("X OAuth 2 token generation failed. See Diagnostics.")
-            self.refresh_diagnostics()
+
+        ttk.Button(actions, text="Cancel", command=wizard.destroy).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="Exchange & Save Tokens", style="Accent.TButton", command=exchange_and_save).pack(side=tk.RIGHT, padx=(0, 8))
+
+        wizard.transient(self)
+        wizard.grab_set()
+        paste_box.focus_set()
 
     def refresh_x(self):
         items = fetch_x_feed({})

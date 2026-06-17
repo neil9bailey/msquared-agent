@@ -319,6 +319,25 @@ def test_oauth2_authorization_code_exchange_saves_tokens():
     assert "new-user-access-token" not in str(read_log_events())
 
 
+def test_oauth2_exchange_rejects_authorization_start_url_with_clear_message():
+    with pytest.raises(ValueError) as exc:
+        exchange_oauth2_authorization_code(
+            "https://x.com/i/oauth2/authorize?response_type=code&client_id=client-id",
+            "verifier-123",
+            "state-123",
+            {
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "callback_uri": "https://example.com/oauth/x/callback",
+            },
+        )
+
+    message = str(exc.value)
+    assert "authorization start URL" in message
+    assert "final redirected URL" in message
+    assert "code=" in message
+
+
 def test_x_connection_uses_oauth2_users_me():
     calls = []
 

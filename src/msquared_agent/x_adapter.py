@@ -507,6 +507,11 @@ def _extract_oauth2_authorization_code(code_or_url: str, expected_state: str = "
         raise ValueError("Paste the full redirected URL or OAuth 2.0 authorization code.")
     parsed = urlparse(raw)
     query = parse_qs(parsed.query)
+    if parsed.netloc.lower() in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"} and parsed.path == "/i/oauth2/authorize":
+        raise ValueError(
+            "You pasted the X authorization start URL. Open that URL in a browser where @MSQUARED_2026 is logged in, "
+            "authorize the app, then paste the final redirected URL that contains code= from the browser address bar."
+        )
     if query:
         error = query.get("error", [""])[0]
         if error:
@@ -517,8 +522,10 @@ def _extract_oauth2_authorization_code(code_or_url: str, expected_state: str = "
             raise RuntimeError("X OAuth 2.0 state mismatch. Start token generation again from Admin.")
         code = query.get("code", [""])[0]
         if not code:
-            raise ValueError("The pasted redirected URL did not contain an OAuth 2.0 code.")
+            raise ValueError("The pasted redirected URL did not contain code=. Copy the final browser address after X authorization.")
         return code
+    if parsed.scheme and parsed.netloc:
+        raise ValueError("The pasted URL did not contain code=. Copy the final browser address after X authorization.")
     return raw
 
 

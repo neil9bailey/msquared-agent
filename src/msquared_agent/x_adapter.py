@@ -18,6 +18,7 @@ from .settings import feature_enabled
 
 
 X_API_BASE = "https://api.x.com"
+X_OAUTH2_AUTHORIZE_URL = "https://x.com/i/oauth2/authorize"
 TRANSIENT_X_STATUSES = {408, 409, 429, 500, 502, 503, 504}
 PAYMENT_REQUIRED_HELP = (
     "X API returned 402 Payment Required. This usually means the current X API project plan "
@@ -447,7 +448,7 @@ def build_oauth2_authorization_url(config: dict | None = None, scopes: tuple[str
         "code_challenge_method": "S256",
     }
     return {
-        "authorization_url": f"https://twitter.com/i/oauth2/authorize?{urlencode(params)}",
+        "authorization_url": f"{X_OAUTH2_AUTHORIZE_URL}?{urlencode(params)}",
         "code_verifier": code_verifier,
         "state": state,
         "redirect_uri": redirect_uri,

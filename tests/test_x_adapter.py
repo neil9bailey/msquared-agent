@@ -271,7 +271,7 @@ def test_oauth2_authorization_url_uses_pkce_and_requested_scopes():
         "callback_uri": "https://example.com/oauth/x/callback",
     })
 
-    assert flow["authorization_url"].startswith("https://twitter.com/i/oauth2/authorize?")
+    assert flow["authorization_url"].startswith("https://x.com/i/oauth2/authorize?")
     assert "client_id=client-id" in flow["authorization_url"]
     assert "code_challenge_method=S256" in flow["authorization_url"]
     assert "tweet.write" in flow["scope"]

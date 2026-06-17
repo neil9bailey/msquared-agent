@@ -736,7 +736,9 @@ class MSquaredDesktopApp(tk.Tk):
         pasted = simpledialog.askstring(
             "Paste X redirect",
             "The X authorization URL opened in your browser and was copied to the clipboard.\n\n"
-            "Authorize the MSquared X account, then paste the final redirected URL or the code value here:",
+            "Use a browser/profile already logged in as @MSQUARED_2026. If X says you must be logged in, sign in, "
+            "then paste the copied authorization URL into that same logged-in tab again.\n\n"
+            "After authorizing, paste the final redirected URL or the code value here:",
         )
         if not pasted:
             self.status_text.set("X OAuth 2 token generation started but no code was pasted.")

@@ -22,7 +22,16 @@ from msquared_agent.product_knowledge import build_product_knowledge_index, buil
 from msquared_agent.risk_classifier import classify_action
 from msquared_agent.settings import DEFAULT_FEATURE_FLAGS, load_feature_flags, save_feature_flags
 from msquared_agent.text_hygiene import display_excerpt, product_excerpt
-from msquared_agent.x_adapter import build_oauth2_authorization_url, exchange_oauth2_authorization_code, fetch_x_feed, post_approved_tweet, test_x_connection
+from msquared_agent.x_adapter import (
+    build_oauth2_authorization_url,
+    clear_oauth2_pending_flow,
+    exchange_oauth2_authorization_code,
+    fetch_x_feed,
+    load_oauth2_pending_flow,
+    post_approved_tweet,
+    save_oauth2_pending_flow,
+    test_x_connection,
+)
 
 
 DEFAULT_X_APP_VALUES = {
@@ -554,6 +563,7 @@ class MSquaredDesktopApp(tk.Tk):
         oauth_actions = ttk.Frame(x_frame)
         oauth_actions.grid(row=25, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         ttk.Button(oauth_actions, text="Generate OAuth 2 Tokens", command=self.generate_x_oauth2_tokens).pack(side=tk.LEFT)
+        ttk.Button(oauth_actions, text="Resume OAuth 2 Exchange", command=self.resume_x_oauth2_exchange).pack(side=tk.LEFT, padx=(8, 0))
         x_hint = (
             "Read monitoring uses the App Bearer Token first. OAuth 2.0 Client ID/Secret alone are not API tokens; "
             "use Generate OAuth 2 Tokens to authorize the MSquared account and save user-context posting tokens. "
@@ -723,6 +733,7 @@ class MSquaredDesktopApp(tk.Tk):
             })
             flow = build_oauth2_authorization_url(config)
             self.pending_x_oauth2_flow = flow
+            save_oauth2_pending_flow(flow)
             self.clipboard_clear()
             self.clipboard_append(flow["authorization_url"])
             log_event("x_oauth2_authorization_started", "info", "X OAuth 2.0 authorization URL opened.", {"scope": flow["scope"]})
@@ -734,6 +745,19 @@ class MSquaredDesktopApp(tk.Tk):
 
         self._show_x_oauth2_wizard(flow, config)
         webbrowser.open(flow["authorization_url"])
+
+    def resume_x_oauth2_exchange(self):
+        flow = load_oauth2_pending_flow()
+        if not flow:
+            messagebox.showinfo("No pending OAuth flow", "No pending X OAuth 2.0 flow was found. Click Generate OAuth 2 Tokens first.")
+            return
+        if not flow.get("code_verifier"):
+            clear_oauth2_pending_flow()
+            messagebox.showinfo("Pending flow incomplete", "The saved OAuth flow was incomplete. Click Generate OAuth 2 Tokens again.")
+            return
+        self.pending_x_oauth2_flow = flow
+        self._show_x_oauth2_wizard(flow, self._x_oauth_admin_config())
+        self.status_text.set("Resumed pending X OAuth 2 exchange. Paste the final callback URL or code into the wizard.")
 
     def _show_x_oauth2_wizard(self, flow: dict, config: dict):
         wizard = tk.Toplevel(self)
@@ -788,6 +812,16 @@ class MSquaredDesktopApp(tk.Tk):
         actions = ttk.Frame(wizard)
         actions.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 12))
 
+        def paste_from_clipboard():
+            try:
+                text = self.clipboard_get()
+            except tk.TclError:
+                messagebox.showinfo("Clipboard empty", "The clipboard does not contain text.", parent=wizard)
+                return
+            paste_box.delete("1.0", tk.END)
+            paste_box.insert("1.0", text.strip())
+            self.status_text.set("Pasted clipboard text into the X OAuth exchange box.")
+
         def exchange_and_save():
             pasted = paste_box.get("1.0", tk.END).strip()
             if not pasted:
@@ -812,6 +846,7 @@ class MSquaredDesktopApp(tk.Tk):
                 if key in self.admin_vars:
                     self.admin_vars[key].set(values.get(key, ""))
             self.pending_x_oauth2_flow = None
+            clear_oauth2_pending_flow()
             self.refresh_connector_status()
             self.refresh_diagnostics()
             wizard.destroy()
@@ -823,6 +858,7 @@ class MSquaredDesktopApp(tk.Tk):
 
         ttk.Button(actions, text="Cancel", command=wizard.destroy).pack(side=tk.RIGHT)
         ttk.Button(actions, text="Exchange & Save Tokens", style="Accent.TButton", command=exchange_and_save).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(actions, text="Paste Clipboard", command=paste_from_clipboard).pack(side=tk.LEFT)
 
         wizard.transient(self)
         wizard.grab_set()

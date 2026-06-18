@@ -8,10 +8,14 @@ from msquared_agent.env_loader import read_env_values
 from msquared_agent.settings import save_feature_flags
 from msquared_agent.x_adapter import (
     build_oauth2_authorization_url,
+    clear_oauth2_pending_flow,
+    exchange_pending_oauth2_authorization_code,
     exchange_oauth2_authorization_code,
     fetch_x_feed,
+    load_oauth2_pending_flow,
     post_approved_tweet,
     refresh_oauth2_access_token,
+    save_oauth2_pending_flow,
     test_x_connection as run_x_connection_test,
 )
 
@@ -317,6 +321,56 @@ def test_oauth2_authorization_code_exchange_saves_tokens():
     assert values["X_OAUTH2_ACCESS_TOKEN"] == "new-user-access-token"
     assert values["X_OAUTH2_REFRESH_TOKEN"] == "new-user-refresh-token"
     assert "new-user-access-token" not in str(read_log_events())
+
+
+def test_oauth2_pending_flow_can_resume_exchange():
+    flow = {
+        "authorization_url": "https://x.com/i/oauth2/authorize?response_type=code",
+        "code_verifier": "verifier-123",
+        "state": "state-123",
+        "redirect_uri": "https://example.com/oauth/x/callback",
+        "scope": "tweet.read tweet.write users.read offline.access",
+    }
+    save_oauth2_pending_flow(flow)
+    assert load_oauth2_pending_flow()["state"] == "state-123"
+    captured = {}
+
+    def fake_post(url, headers=None, data=None, timeout=None):
+        captured["data"] = data
+        return FakeResponse({
+            "access_token": "resumed-access-token",
+            "refresh_token": "resumed-refresh-token",
+            "expires_in": 7200,
+            "scope": "tweet.read tweet.write users.read offline.access",
+        }, url=url)
+
+    result = exchange_pending_oauth2_authorization_code(
+        "https://example.com/oauth/x/callback?state=state-123&code=auth-code-123",
+        {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+        },
+        http_post=fake_post,
+    )
+
+    values = read_env_values()
+    assert result["ok"] is True
+    assert captured["data"]["code"] == "auth-code-123"
+    assert captured["data"]["code_verifier"] == "verifier-123"
+    assert values["X_OAUTH2_ACCESS_TOKEN"] == "resumed-access-token"
+    assert values["X_OAUTH2_REFRESH_TOKEN"] == "resumed-refresh-token"
+    assert load_oauth2_pending_flow() == {}
+
+
+def test_oauth2_pending_flow_can_be_cleared():
+    save_oauth2_pending_flow({
+        "authorization_url": "https://x.com/i/oauth2/authorize?response_type=code",
+        "code_verifier": "verifier-123",
+        "state": "state-123",
+    })
+    clear_oauth2_pending_flow()
+
+    assert load_oauth2_pending_flow() == {}
 
 
 def test_oauth2_exchange_rejects_authorization_start_url_with_clear_message():

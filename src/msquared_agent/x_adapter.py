@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, quote, urlencode, urlparse
@@ -14,11 +15,13 @@ from .audit_store import log_action
 from .claim_guard import check_claims
 from .env_loader import get_env, load_env_file, save_env_values
 from .intake_store import add_intake_item
+from .paths import writable_path
 from .settings import feature_enabled
 
 
 X_API_BASE = "https://api.x.com"
 X_OAUTH2_AUTHORIZE_URL = "https://x.com/i/oauth2/authorize"
+X_OAUTH2_PENDING_FILE = ("data", "x_oauth2_pending.json")
 TRANSIENT_X_STATUSES = {408, 409, 429, 500, 502, 503, 504}
 PAYMENT_REQUIRED_HELP = (
     "X API returned 402 Payment Required. This usually means the current X API project plan "
@@ -454,6 +457,65 @@ def build_oauth2_authorization_url(config: dict | None = None, scopes: tuple[str
         "redirect_uri": redirect_uri,
         "scope": scope,
     }
+
+
+def save_oauth2_pending_flow(flow: dict) -> dict:
+    pending = {
+        "authorization_url": flow.get("authorization_url", ""),
+        "code_verifier": flow.get("code_verifier", ""),
+        "state": flow.get("state", ""),
+        "redirect_uri": flow.get("redirect_uri", ""),
+        "scope": flow.get("scope", ""),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path = writable_path(*X_OAUTH2_PENDING_FILE)
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(pending, file, indent=2)
+    log_event(
+        "x_oauth2_pending_flow_saved",
+        "info",
+        "X OAuth 2.0 pending authorization flow saved locally.",
+        {"state_configured": bool(pending["state"]), "scope_configured": bool(pending["scope"])},
+    )
+    return pending
+
+
+def load_oauth2_pending_flow() -> dict:
+    path = writable_path(*X_OAUTH2_PENDING_FILE)
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as file:
+            pending = json.load(file) or {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return pending if isinstance(pending, dict) else {}
+
+
+def clear_oauth2_pending_flow() -> None:
+    path = writable_path(*X_OAUTH2_PENDING_FILE)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def exchange_pending_oauth2_authorization_code(code_or_url: str, config: dict | None = None, http_post=None) -> dict:
+    pending = load_oauth2_pending_flow()
+    if not pending.get("code_verifier"):
+        raise ValueError("No pending X OAuth 2.0 verifier was found. Click Generate OAuth 2 Tokens again, then use the new final callback URL.")
+    merged_config = dict(config or {})
+    if pending.get("redirect_uri") and not merged_config.get("callback_uri"):
+        merged_config["callback_uri"] = pending["redirect_uri"]
+    result = exchange_oauth2_authorization_code(
+        code_or_url,
+        pending["code_verifier"],
+        pending.get("state", ""),
+        merged_config,
+        http_post=http_post,
+    )
+    clear_oauth2_pending_flow()
+    return result
 
 
 def exchange_oauth2_authorization_code(code_or_url: str, code_verifier: str, state: str = "", config: dict | None = None, http_post=None) -> dict:

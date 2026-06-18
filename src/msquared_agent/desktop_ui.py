@@ -39,8 +39,8 @@ DEFAULT_X_APP_VALUES = {
     "X_WEBSITE_URL": "https://diiac.io",
     "X_ORGANIZATION_NAME": "DIIaC Ltd",
     "X_ORGANIZATION_URL": "https://diiac.io",
-    "X_TERMS_URL": "https://diiac.io/terms",
-    "X_PRIVACY_URL": "https://diiac.io/privacy",
+    "X_TERMS_URL": "https://diiac.io/legal.html",
+    "X_PRIVACY_URL": "https://diiac.io/legal.html",
 }
 
 

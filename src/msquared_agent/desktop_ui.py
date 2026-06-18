@@ -35,7 +35,7 @@ from msquared_agent.x_adapter import (
 
 
 DEFAULT_X_APP_VALUES = {
-    "X_CALLBACK_URI": "https://diiac.io/oauth/x/callback",
+    "X_CALLBACK_URI": "https://diiac.io/legal.html",
     "X_WEBSITE_URL": "https://diiac.io",
     "X_ORGANIZATION_NAME": "DIIaC Ltd",
     "X_ORGANIZATION_URL": "https://diiac.io",
@@ -804,7 +804,7 @@ class MSquaredDesktopApp(tk.Tk):
             "Step 1. The authorization URL is copied below and opened in your browser.\n"
             "Step 2. Sign in to X as @MSQUARED_2026 if needed.\n"
             "Step 3. Authorize the app.\n"
-            "Step 4. Copy the final browser address that starts with https://diiac.io/oauth/x/callback and contains code=.\n"
+            "Step 4. Copy the final browser address that starts with https://diiac.io/legal.html and contains code=.\n"
             "Step 5. Paste that final address, or just the code value, into the box below and save.\n\n"
             "Do not paste the x.com/i/oauth2/authorize URL into the final box. That is only the start URL."
         )
@@ -836,7 +836,7 @@ class MSquaredDesktopApp(tk.Tk):
         paste_frame.rowconfigure(1, weight=1)
         ttk.Label(
             paste_frame,
-            text="Expected final URL format: https://diiac.io/oauth/x/callback?state=...&code=...",
+            text="Expected final URL format: https://diiac.io/legal.html?state=...&code=...",
             wraplength=720,
         ).grid(row=0, column=0, sticky="w", pady=(0, 6))
         paste_box = tk.Text(paste_frame, height=8, wrap=tk.WORD, font=("Consolas", 9), undo=True)

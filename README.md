@@ -92,6 +92,8 @@ For X OAuth 2.0 user-context posting, Client ID and Client Secret are not enough
 
 The OAuth 2 authorization URL is copied to the clipboard and shown in a wizard. Use a browser profile logged in as `@MSQUARED_2026`. If X shows **To use this App you have to be logged in to X**, sign in, then paste the copied authorization URL into that same logged-in tab. After approval, copy the final browser address that starts with `https://diiac.io/oauth/x/callback` and contains `code=`, then paste that final address into the wizard. Do not paste the `x.com/i/oauth2/authorize` start URL into the final box.
 
+The Terms and Privacy links shown on X's consent page come from the X Developer Portal app settings, not from the OAuth URL. Use **Copy X Portal Values** in Admin, paste those values into the X Developer Portal app settings, and save the app in X before generating a new OAuth link.
+
 The **AI Agent** fields are optional. Without `OPENAI_API_KEY`, the Agent tab uses the local governed fallback. With `OPENAI_API_KEY` and `OPENAI_MODEL`, the Agent tab uses OpenAI's Responses API for interactive operator chat and OpenAI-backed draft creation while still creating drafts only through the approval queue. The default model is `gpt-5.4-mini-2026-03-17`; if OpenAI returns an authorization, model-access, quota, or network error, the Agent logs the reason and creates a local governed fallback draft instead of blocking the approval workflow.
 
 The Agent product context is packaged in `prompts\MSQUARED_PRODUCT_CONTEXT.md`. It combines DIIaC IT Enterprise / IT Services and M2 product knowledge, including the split between DIIaC as governed decision assurance infrastructure and M2 as the advisory interpretability/evaluation layer.

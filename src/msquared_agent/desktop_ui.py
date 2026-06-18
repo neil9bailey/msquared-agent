@@ -564,10 +564,12 @@ class MSquaredDesktopApp(tk.Tk):
         oauth_actions.grid(row=25, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         ttk.Button(oauth_actions, text="Generate OAuth 2 Tokens", command=self.generate_x_oauth2_tokens).pack(side=tk.LEFT)
         ttk.Button(oauth_actions, text="Resume OAuth 2 Exchange", command=self.resume_x_oauth2_exchange).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(oauth_actions, text="Copy X Portal Values", command=self.copy_x_portal_values).pack(side=tk.LEFT, padx=(8, 0))
         x_hint = (
             "Read monitoring uses the App Bearer Token first. OAuth 2.0 Client ID/Secret alone are not API tokens; "
             "use Generate OAuth 2 Tokens to authorize the MSquared account and save user-context posting tokens. "
-            "OAuth 1.0a fallback is off by default because X may reject older access tokens for /2/tweets."
+            "OAuth 1.0a fallback is off by default because X may reject older access tokens for /2/tweets. "
+            "The X consent page Terms and Privacy links come from the X Developer Portal app settings, not this OAuth URL."
         )
         ttk.Label(x_frame, text=x_hint, wraplength=500).grid(row=26, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
@@ -719,6 +721,37 @@ class MSquaredDesktopApp(tk.Tk):
             "client_secret": value("X_CLIENT_SECRET"),
             "callback_uri": value("X_CALLBACK_URI") or DEFAULT_X_APP_VALUES["X_CALLBACK_URI"],
         }
+
+    def _admin_value(self, key: str, default: str = "") -> str:
+        var = self.admin_vars.get(key)
+        value = var.get().strip() if var else ""
+        return value or default
+
+    def copy_x_portal_values(self):
+        values = {
+            "App permissions": self._admin_value("X_APP_PERMISSIONS", "Read and write and Direct message"),
+            "Type of App": self._admin_value("X_APP_TYPE", "Web App, Automated App or Bot"),
+            "Callback URI / Redirect URL": self._admin_value("X_CALLBACK_URI", DEFAULT_X_APP_VALUES["X_CALLBACK_URI"]),
+            "Website URL": self._admin_value("X_WEBSITE_URL", DEFAULT_X_APP_VALUES["X_WEBSITE_URL"]),
+            "Organization name": self._admin_value("X_ORGANIZATION_NAME", DEFAULT_X_APP_VALUES["X_ORGANIZATION_NAME"]),
+            "Organization URL": self._admin_value("X_ORGANIZATION_URL", DEFAULT_X_APP_VALUES["X_ORGANIZATION_URL"]),
+            "Terms of Service": self._admin_value("X_TERMS_URL", DEFAULT_X_APP_VALUES["X_TERMS_URL"]),
+            "Privacy Policy": self._admin_value("X_PRIVACY_URL", DEFAULT_X_APP_VALUES["X_PRIVACY_URL"]),
+            "Request email from users": self._admin_value("X_REQUEST_EMAIL_FROM_USERS", "false"),
+        }
+        text = "\n".join(
+            [
+                "X Developer Portal values for MSquared Agent",
+                "Paste these into the X app User authentication settings. The X OAuth consent page uses these portal values.",
+                "",
+                *[f"{label}: {value}" for label, value in values.items()],
+            ]
+        )
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        log_event("x_portal_values_copied", "info", "X Developer Portal values copied to clipboard.")
+        self.status_text.set("X Developer Portal values copied. Paste them into the X app settings, then save in X.")
+        messagebox.showinfo("X Portal Values Copied", "Paste the copied values into the X Developer Portal app settings, then save the app in X.")
 
     def generate_x_oauth2_tokens(self):
         config = self._x_oauth_admin_config()

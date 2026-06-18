@@ -6,6 +6,7 @@ def detect_action_for_intake(item: dict | None) -> dict:
     channel = item.get("channel") or ""
     source_type = item.get("source_type") or item.get("type") or ""
     canonical_id = item.get("canonical_id") or item.get("id") or ""
+    triage = item.get("triage") or {}
 
     if not item:
         return {
@@ -15,6 +16,26 @@ def detect_action_for_intake(item: dict | None) -> dict:
             "confidence": "none",
             "requires_source_id": False,
             "source_intake_id": "",
+        }
+
+    if triage.get("recommended_action") == "archive":
+        return {
+            "action_type": "manual",
+            "label": f"Triage: {triage.get('label', 'archive')}",
+            "recommended_next_step": "Archive locally or keep for manual review. Do not draft a reply unless the operator overrides triage.",
+            "confidence": str(triage.get("confidence", "medium")),
+            "requires_source_id": False,
+            "source_intake_id": canonical_id,
+        }
+
+    if triage.get("recommended_action") == "escalate":
+        return {
+            "action_type": "manual",
+            "label": "Escalate",
+            "recommended_next_step": "Escalate to the human operator before drafting or responding.",
+            "confidence": str(triage.get("confidence", "medium")),
+            "requires_source_id": False,
+            "source_intake_id": canonical_id,
         }
 
     if channel == "email":
@@ -76,6 +97,12 @@ def action_summary(item: dict | None, draft: dict | None = None) -> str:
         f"Next: {action.get('recommended_next_step')}",
     ]
     if item:
+        triage = item.get("triage") or {}
+        if triage:
+            parts.extend([
+                f"Triage: {triage.get('label')} | action: {triage.get('recommended_action')} | waiting reply: {triage.get('waiting_reply')}",
+                f"Product match: {triage.get('product_match')} | confidence: {triage.get('confidence')}",
+            ])
         subject = item.get("subject") or item.get("text") or ""
         if subject:
             parts.append(f"Summary: {product_excerpt(subject, 220)}")

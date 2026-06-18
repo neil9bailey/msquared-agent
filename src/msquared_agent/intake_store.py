@@ -121,10 +121,14 @@ def get_intake_item(item_id: str) -> Dict[str, Any] | None:
 
 
 def update_intake_status(item_id: str, status: str) -> Dict[str, Any] | None:
+    return update_intake_item(item_id, {"status": status})
+
+
+def update_intake_item(item_id: str, updates: Dict[str, Any]) -> Dict[str, Any] | None:
     items = load_intake()
     for item in items:
         if item.get("id") == item_id:
-            item["status"] = status
+            item.update(updates)
             item["updated_at"] = _now()
             save_intake(items)
             return item

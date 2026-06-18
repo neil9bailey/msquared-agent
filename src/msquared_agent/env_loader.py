@@ -68,6 +68,10 @@ ENV_KEYS = [
     "ALLOW_KEYWORD_SEARCH_AUTO_REPLY",
     "ALLOW_UNSOLICITED_DM",
     "METADATA_ONLY_LEARNING",
+    "ENABLE_AUTO_TRIAGE",
+    "AUTO_ARCHIVE_HIGH_CONFIDENCE_SPAM",
+    "AUTO_DRAFT_RELEVANT_REPLIES",
+    "AUTO_TRIAGE_CONFIDENCE_THRESHOLD",
 ]
 
 
@@ -201,6 +205,10 @@ def save_env_values(values: dict, env_path: Path | None = None) -> Path:
         "ALLOW_KEYWORD_SEARCH_AUTO_REPLY",
         "ALLOW_UNSOLICITED_DM",
         "METADATA_ONLY_LEARNING",
+        "ENABLE_AUTO_TRIAGE",
+        "AUTO_ARCHIVE_HIGH_CONFIDENCE_SPAM",
+        "AUTO_DRAFT_RELEVANT_REPLIES",
+        "AUTO_TRIAGE_CONFIDENCE_THRESHOLD",
     ]:
         lines.append(f'{key}="{current.get(key, "")}"')
 

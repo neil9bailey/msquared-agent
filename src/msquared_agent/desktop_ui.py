@@ -16,6 +16,7 @@ from msquared_agent.email_adapter import fetch_inbound_emails, send_approved_ema
 from msquared_agent.feedback_store import feedback_summary
 from msquared_agent.interactive_agent import agent_status, ask_agent, create_agent_draft, summarize_context
 from msquared_agent.intake_store import add_intake_item, list_intake, update_intake_status
+from msquared_agent.intake_triage import intake_triage_status, triage_all_intake, waiting_reply_items
 from msquared_agent.legal_agent import review_approval_item
 from msquared_agent.paths import app_root
 from msquared_agent.product_knowledge import build_product_knowledge_index, build_validation_packet, knowledge_status
@@ -180,11 +181,29 @@ class MSquaredDesktopApp(tk.Tk):
         ttk.Button(toolbar, text="Refresh X", command=self.refresh_x).pack(side=tk.LEFT)
         ttk.Button(toolbar, text="Refresh Email", command=self.refresh_email).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(toolbar, text="Refresh All", command=self.refresh_all_sources).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(toolbar, text="Run Triage", command=self.run_intake_triage).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Button(toolbar, text="Waiting Replies", command=self.review_waiting_replies).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(toolbar, text="Draft Waiting", command=self.draft_waiting_replies).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(toolbar, text="Archive Noise", command=self.archive_high_confidence_noise).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Label(toolbar, text="Status").pack(side=tk.LEFT, padx=(18, 6))
         filter_picker = ttk.Combobox(
             toolbar,
             textvariable=self.intake_filter,
-            values=("all", "new", "drafted", "archived"),
+            values=(
+                "all",
+                "new",
+                "needs_reply",
+                "no_reply_needed",
+                "needs_review",
+                "spam",
+                "unrelated",
+                "low_quality",
+                "drafted",
+                "archived",
+                "triaged",
+                "untriaged",
+                "archive_candidates",
+            ),
             width=12,
             state="readonly",
         )
@@ -206,10 +225,18 @@ class MSquaredDesktopApp(tk.Tk):
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
 
-        columns = ("id", "channel", "source", "from", "subject", "status")
+        columns = ("id", "channel", "source", "from", "subject", "status", "triage")
         self.intake_table = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
-        headings = {"id": "ID", "channel": "Channel", "source": "Source", "from": "From", "subject": "Subject/Text", "status": "Status"}
-        widths = {"id": 155, "channel": 75, "source": 120, "from": 140, "subject": 320, "status": 80}
+        headings = {
+            "id": "ID",
+            "channel": "Channel",
+            "source": "Source",
+            "from": "From",
+            "subject": "Subject/Text",
+            "status": "Status",
+            "triage": "Triage",
+        }
+        widths = {"id": 155, "channel": 75, "source": 120, "from": 140, "subject": 320, "status": 100, "triage": 150}
         for column in columns:
             self.intake_table.heading(column, text=headings[column])
             self.intake_table.column(column, width=widths[column], minwidth=60, stretch=column == "subject")
@@ -529,6 +556,7 @@ class MSquaredDesktopApp(tk.Tk):
             values["OPENAI_MODEL"] = DEFAULT_OPENAI_MODEL
         values.setdefault("PRODUCT_KNOWLEDGE_ROOTS", r"F:\code\diiac\itservices.diiac.io;F:\code\M-Squared-Architecture")
         values.setdefault("ALLOW_OPENAI_TECHNICAL_CONTEXT", "false")
+        values.setdefault("AUTO_TRIAGE_CONFIDENCE_THRESHOLD", "0.90")
 
         x_frame = ttk.LabelFrame(parent, text="X Developer Portal Settings", padding=10)
         x_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 8))
@@ -618,6 +646,7 @@ class MSquaredDesktopApp(tk.Tk):
 
         flags_frame = ttk.LabelFrame(parent, text="Feature Flags", padding=10)
         flags_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        flags_frame.columnconfigure(1, weight=1)
         flags = load_feature_flags()
         flag_columns = [ttk.Frame(flags_frame), ttk.Frame(flags_frame)]
         flag_columns[0].grid(row=0, column=0, sticky="nw", padx=(0, 28))
@@ -626,6 +655,18 @@ class MSquaredDesktopApp(tk.Tk):
             var = tk.BooleanVar(value=bool(flags.get(key)))
             self.admin_flag_vars[key] = var
             ttk.Checkbutton(flag_columns[index % 2], text=key, variable=var).pack(anchor=tk.W, pady=2)
+        automation_row = ttk.Frame(flags_frame)
+        automation_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        automation_row.columnconfigure(1, weight=1)
+        self._admin_entry(automation_row, 0, "Auto-triage archive confidence", "AUTO_TRIAGE_CONFIDENCE_THRESHOLD", values)
+        ttk.Label(
+            flags_frame,
+            text=(
+                "Auto triage can classify intake after refresh. Auto archive only moves high-confidence spam/noise "
+                "to the local archived status; it does not delete anything from X or email."
+            ),
+            wraplength=920,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         note = (
             "Credentials are saved in .env beside the portable exe. Keep that file private. "
@@ -899,22 +940,25 @@ class MSquaredDesktopApp(tk.Tk):
 
     def refresh_x(self):
         items = fetch_x_feed({})
-        self.status_text.set(self._refresh_summary("x", len(items)))
+        triage_result = self._maybe_auto_triage_after_refresh()
+        self.status_text.set(self._with_triage_summary(self._refresh_summary("x", len(items)), triage_result))
         self.refresh_intake()
         self.refresh_diagnostics()
 
     def refresh_email(self):
         items = fetch_inbound_emails({})
-        self.status_text.set(self._refresh_summary("email", len(items)))
+        triage_result = self._maybe_auto_triage_after_refresh()
+        self.status_text.set(self._with_triage_summary(self._refresh_summary("email", len(items)), triage_result))
         self.refresh_intake()
         self.refresh_diagnostics()
 
     def refresh_all_sources(self):
         x_items = fetch_x_feed({})
         email_items = fetch_inbound_emails({})
+        triage_result = self._maybe_auto_triage_after_refresh()
         x_summary = self._refresh_summary("x", len(x_items))
         email_summary = self._refresh_summary("email", len(email_items))
-        self.status_text.set(f"{x_summary} {email_summary}")
+        self.status_text.set(self._with_triage_summary(f"{x_summary} {email_summary}", triage_result))
         self.refresh_intake()
         self.refresh_diagnostics()
 
@@ -937,6 +981,164 @@ class MSquaredDesktopApp(tk.Tk):
         self.status_text.set(f"Added intake {item['id']}.")
         self.refresh_intake(select_item_id=item["id"])
         self.refresh_diagnostics()
+
+    def run_intake_triage(self):
+        result = triage_all_intake(auto_archive=False)
+        self.status_text.set(self._format_triage_result("Triage complete.", result))
+        self._append_agent_message("MSquared", self._format_triage_agent_summary(result))
+        self.refresh_intake()
+        self.refresh_diagnostics()
+
+    def review_waiting_replies(self):
+        result = triage_all_intake(auto_archive=False)
+        self.intake_filter.set("needs_reply")
+        self.intake_channel_filter.set("all")
+        waiting_count = result.get("waiting_reply_count", 0)
+        log_event(
+            "waiting_reply_review_completed",
+            "info",
+            "Waiting-reply review completed.",
+            {"waiting_reply_count": waiting_count, "label_counts": result.get("label_counts", {})},
+        )
+        self.status_text.set(f"Found {waiting_count} intake item(s) waiting on MSquared. Filter set to Needs Reply.")
+        self._append_agent_message("MSquared", self._format_triage_agent_summary(result))
+        self.refresh_intake()
+        self.refresh_diagnostics()
+
+    def draft_waiting_replies(self):
+        triage_result = triage_all_intake(auto_archive=False)
+        draft_result = self._create_drafts_for_waiting_replies()
+        self.queue_filter.set("all")
+        self.intake_filter.set("drafted" if draft_result["created_count"] else "needs_reply")
+        self.status_text.set(
+            f"Created {draft_result['created_count']} approval draft(s) from waiting replies. "
+            f"Skipped {draft_result['skipped_count']} item(s)."
+        )
+        self._append_agent_message(
+            "MSquared",
+            f"{self._format_triage_agent_summary(triage_result)}\n\nDraft automation: "
+            f"{draft_result['created_count']} draft(s) created, {draft_result['skipped_count']} skipped. "
+            "Nothing was posted or sent.",
+        )
+        self.refresh_intake()
+        self.refresh_queue()
+        self.refresh_diagnostics()
+
+    def archive_high_confidence_noise(self):
+        confirmed = messagebox.askyesno(
+            "Archive noise locally",
+            "This will move high-confidence spam, unrelated, or low-quality intake to local Archived. "
+            "It will not delete anything from X or email. Continue?",
+        )
+        if not confirmed:
+            return
+        result = triage_all_intake(auto_archive=True)
+        self.status_text.set(self._format_triage_result("Local archive complete.", result))
+        self._append_agent_message("MSquared", self._format_triage_agent_summary(result))
+        self.refresh_intake()
+        self.refresh_diagnostics()
+
+    def _maybe_auto_triage_after_refresh(self):
+        flags = load_feature_flags()
+        if not flags.get("ENABLE_AUTO_TRIAGE"):
+            return None
+        try:
+            result = triage_all_intake(auto_archive=bool(flags.get("AUTO_ARCHIVE_HIGH_CONFIDENCE_SPAM")))
+            if flags.get("AUTO_DRAFT_RELEVANT_REPLIES"):
+                result["auto_draft"] = self._create_drafts_for_waiting_replies()
+            return result
+        except Exception as exc:
+            log_event("auto_triage_failed", "error", "Automatic intake triage failed after refresh.", {"error": str(exc)})
+            messagebox.showerror("Auto triage failed", str(exc))
+            return {"error": str(exc)}
+
+    def _create_drafts_for_waiting_replies(self, max_items: int = 25) -> dict:
+        waiting = waiting_reply_items()
+        existing_source_ids = {
+            item.get("source_intake_id")
+            for item in list_queue()
+            if item.get("status") not in {"rejected", "archived", "sent_or_posted"}
+        }
+        result = {"created_count": 0, "skipped_count": 0, "created_ids": [], "errors": []}
+        for intake in waiting[:max_items]:
+            source_id = intake.get("canonical_id") or intake.get("id")
+            if intake.get("status") == "drafted" or source_id in existing_source_ids:
+                result["skipped_count"] += 1
+                continue
+            action = detect_action_for_intake(intake)
+            content_type = action.get("action_type")
+            if content_type not in {"x_reply", "email_response"}:
+                result["skipped_count"] += 1
+                continue
+            draft_input = "\n\n".join(
+                part for part in (intake.get("subject", ""), intake.get("text", "") or intake.get("body", "")) if part
+            ).strip()
+            try:
+                draft = create_agent_draft(
+                    content_type,
+                    draft_input or action_summary(intake),
+                    {"source": intake, "action": action, "knowledge_mode": self.agent_knowledge_mode.get()},
+                )
+            except Exception as exc:
+                result["errors"].append({"intake_id": intake.get("id"), "error": str(exc)})
+                log_event(
+                    "waiting_reply_draft_failed",
+                    "error",
+                    "Waiting-reply draft creation failed.",
+                    {"intake_id": intake.get("id"), "error": str(exc)},
+                )
+                continue
+            update_intake_status(intake["id"], "drafted")
+            existing_source_ids.add(source_id)
+            result["created_count"] += 1
+            result["created_ids"].append(draft.get("id"))
+            log_event(
+                "waiting_reply_draft_created",
+                "info",
+                "Waiting-reply intake was drafted into the approval queue.",
+                {
+                    "intake_id": intake.get("id"),
+                    "canonical_id": intake.get("canonical_id"),
+                    "approval_item_id": draft.get("id"),
+                    "action_type": content_type,
+                },
+            )
+        if len(waiting) > max_items:
+            result["skipped_count"] += len(waiting) - max_items
+        log_event("waiting_reply_draft_batch_completed", "info", "Waiting-reply draft batch completed.", result)
+        return result
+
+    def _format_triage_result(self, prefix: str, result: dict | None) -> str:
+        if not result:
+            return prefix
+        if result.get("error"):
+            return f"{prefix} Triage failed: {result['error']}"
+        return (
+            f"{prefix} Triaged {result.get('triaged_count', 0)} item(s); "
+            f"{result.get('waiting_reply_count', 0)} waiting reply; "
+            f"{result.get('auto_archived_count', 0)} archived locally."
+        )
+
+    def _with_triage_summary(self, summary: str, result: dict | None) -> str:
+        if not result:
+            return summary
+        text = self._format_triage_result("Auto triage:", result)
+        auto_draft = result.get("auto_draft") or {}
+        if auto_draft:
+            text += f" Auto drafted {auto_draft.get('created_count', 0)} waiting replies."
+        return f"{summary} {text}"
+
+    def _format_triage_agent_summary(self, result: dict) -> str:
+        labels = result.get("label_counts", {})
+        label_text = ", ".join(f"{key}: {value}" for key, value in sorted(labels.items())) or "none"
+        return (
+            f"Triage reviewed {result.get('triaged_count', 0)} intake item(s).\n"
+            f"Waiting replies: {result.get('waiting_reply_count', 0)}\n"
+            f"Archived locally: {result.get('auto_archived_count', 0)}\n"
+            f"Labels: {label_text}\n\n"
+            "Use Waiting Replies to focus the queue, Draft Waiting to create approval drafts, "
+            "or Archive Noise to move high-confidence noise out of the working view."
+        )
 
     def _current_agent_context(self) -> dict:
         source = self.agent_context_source.get()
@@ -1340,12 +1542,16 @@ class MSquaredDesktopApp(tk.Tk):
 
     def refresh_intake(self, select_item_id=None):
         selected_channel = self.intake_channel_filter.get()
-        items = list_intake(self.intake_filter.get())
+        items = self._filtered_intake_items(self.intake_filter.get())
         self.intake_items = items if selected_channel == "all" else [item for item in items if item.get("channel") == selected_channel]
         self.intake_table.delete(*self.intake_table.get_children())
         for item in self.intake_items:
             subject = item.get("subject") or item.get("text", "")
             preview = product_excerpt(subject, 80) if item.get("channel") == "x" else display_excerpt(subject, 80)
+            triage = item.get("triage") or {}
+            triage_label = triage.get("label", "")
+            if triage_label:
+                triage_label = f"{triage_label} ({triage.get('confidence', 'n/a')})"
             self.intake_table.insert(
                 "",
                 tk.END,
@@ -1357,6 +1563,7 @@ class MSquaredDesktopApp(tk.Tk):
                     item.get("from") or item.get("author", ""),
                     preview,
                     item.get("status", ""),
+                    triage_label,
                 ),
             )
         if select_item_id and self.intake_table.exists(select_item_id):
@@ -1374,6 +1581,29 @@ class MSquaredDesktopApp(tk.Tk):
             self._set_text(self.intake_preview, "")
         self.refresh_agent_context()
 
+    def _filtered_intake_items(self, selected_filter: str) -> list:
+        items = list_intake("all")
+        if selected_filter == "all":
+            return items
+        if selected_filter == "triaged":
+            return [item for item in items if item.get("triage")]
+        if selected_filter == "untriaged":
+            return [item for item in items if not item.get("triage") and item.get("status") != "archived"]
+        if selected_filter == "archive_candidates":
+            return [
+                item for item in items
+                if item.get("status") != "archived" and (item.get("triage") or {}).get("recommended_action") == "archive"
+            ]
+        if selected_filter == "needs_reply":
+            return [
+                item for item in items
+                if item.get("status") == "needs_reply" or (item.get("triage") or {}).get("waiting_reply")
+            ]
+        return [
+            item for item in items
+            if item.get("status") == selected_filter or (item.get("triage") or {}).get("label") == selected_filter
+        ]
+
     def on_intake_select(self, _event=None):
         selected = self.intake_table.selection()
         if not selected:
@@ -1388,10 +1618,28 @@ class MSquaredDesktopApp(tk.Tk):
         )
         if item.get("source_id"):
             meta += f" | source id {item.get('source_id')}"
+        triage = item.get("triage") or {}
+        if triage:
+            meta += (
+                f" | triage {triage.get('label')} ({triage.get('confidence')}) | "
+                f"next {triage.get('recommended_action')}"
+            )
         self.intake_meta.configure(text=meta)
         detail = item.get("text") or item.get("body") or ""
         if item.get("subject"):
             detail = f"Subject: {item['subject']}\n\n{detail}"
+        if triage:
+            triage_detail = (
+                f"Triage: {triage.get('label')}\n"
+                f"Recommended action: {triage.get('recommended_action')}\n"
+                f"Waiting reply: {triage.get('waiting_reply')}\n"
+                f"Product match: {triage.get('product_match')}\n"
+                f"Confidence: {triage.get('confidence')}\n"
+                f"Reasons: {', '.join(triage.get('reason_tags', [])) or 'none'}\n"
+                f"Summary: {triage.get('summary', '')}\n\n"
+                "Raw intake:\n"
+            )
+            detail = f"{triage_detail}{detail}"
         self._set_text(self.intake_preview, detail)
         self.refresh_agent_context()
 
@@ -1405,6 +1653,13 @@ class MSquaredDesktopApp(tk.Tk):
             return
         if draft_type.startswith("email") and item.get("channel") != "email":
             messagebox.showinfo("Wrong channel", "Select an email intake item for email drafts.")
+            return
+        triage = item.get("triage") or {}
+        if triage.get("recommended_action") in {"archive", "escalate"}:
+            messagebox.showinfo(
+                "Triage blocked draft",
+                "This intake is triaged for archive or escalation. Review the triage detail before overriding manually.",
+            )
             return
         draft_input = "\n\n".join(part for part in (item.get("subject", ""), item.get("text", "") or item.get("body", "")) if part).strip()
         draft = create_agent_draft(draft_type, draft_input, {"source": item, "action": detect_action_for_intake(item)})
@@ -1714,6 +1969,7 @@ class MSquaredDesktopApp(tk.Tk):
             },
             "connector_readiness": connector_status(),
             "pipeline": self._pipeline_status(),
+            "intake_triage": intake_triage_status(),
             "knowledge_library": knowledge_status(),
             "governed_learning": feedback_summary(),
         }
@@ -1727,6 +1983,7 @@ class MSquaredDesktopApp(tk.Tk):
             "recent_audit": read_audit_records()[-50:],
             "readiness": connector_status(),
             "pipeline": self._pipeline_status(),
+            "intake_triage": intake_triage_status(),
             "knowledge_library": knowledge_status(),
             "governed_learning": feedback_summary(),
             "paths": {
@@ -1772,6 +2029,7 @@ class MSquaredDesktopApp(tk.Tk):
             values["OPENAI_MODEL"] = DEFAULT_OPENAI_MODEL
         values.setdefault("PRODUCT_KNOWLEDGE_ROOTS", r"F:\code\diiac\itservices.diiac.io;F:\code\M-Squared-Architecture")
         values.setdefault("ALLOW_OPENAI_TECHNICAL_CONTEXT", "false")
+        values.setdefault("AUTO_TRIAGE_CONFIDENCE_THRESHOLD", "0.90")
         for key, var in self.admin_vars.items():
             var.set(values.get(key, ""))
         flags = load_feature_flags()
@@ -1920,6 +2178,7 @@ class MSquaredDesktopApp(tk.Tk):
             "intake_count": len(intake_items),
             "intake_by_status": intake_by_status,
             "intake_by_channel": intake_by_channel,
+            "intake_triage": intake_triage_status(),
             "approval_count": len(queue_items),
             "approval_by_status": queue_by_status,
             "approval_by_pipeline_state": queue_by_pipeline,

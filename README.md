@@ -55,6 +55,7 @@ The default command excludes `.env`; use the override only for your own machine/
 The interface now follows a clear governed pipeline:
 
 Intake - X mentions, search results, emails
+Triage - Classify needs reply, relevant/no reply, spam, unrelated, low quality, or escalation
 Action Center - Select item -> Generate Draft
 Draft Review - Raw MSquared draft + Legal review + Final version
 Approval - Human review & edit
@@ -66,14 +67,36 @@ Manual drafting is available in an Advanced section for original posts.
 ## Operator workflow
 1. Open the desktop console.
 2. Use **Monitor** to refresh X/email intake or paste a manual X/email item.
-3. Filter intake by status and channel when you need only X or email messages.
-4. Select an intake item. The Agent tab **Action Center** shows the canonical intake ID, detected action, recommended next step, selected draft, and pipeline state.
-5. Use **Generate Draft** to create a raw MSquared draft. The raw draft is preserved separately from Legal and final versions.
-6. Use **Run Legal Review**. The Legal Agent only recommends or applies wording changes for clear legal, compliance, claim-boundary, or private-material issues.
-7. Use **Edit Final** in Approval if the operator needs to adjust the final version before approval.
-8. Use **Approve**, then **Preflight** / **Preflight Payload** to run final safety and payload checks.
-9. Use **Execute** or **Post/Send** only after reviewing the preflight payload. Live posting/sending requires connector readiness and a typed confirmation.
-10. Use **Diagnostics** to see app logs, audit records, connector readiness, pipeline counts, knowledge status, governed-learning counts, and runtime file paths.
+3. Click **Run Triage** to classify intake, **Waiting Replies** to focus only items needing MSquared, **Draft Waiting** to create approval drafts, or **Archive Noise** to move high-confidence spam/unrelated items to local Archived.
+4. Filter intake by status, channel, triage label, waiting reply, untriaged, or archive candidates when you need only X/email messages that matter.
+5. Select an intake item. The Agent tab **Action Center** shows the canonical intake ID, detected action, recommended next step, selected draft, triage status, and pipeline state.
+6. Use **Generate Draft** to create a raw MSquared draft. The raw draft is preserved separately from Legal and final versions.
+7. Use **Run Legal Review**. The Legal Agent only recommends or applies wording changes for clear legal, compliance, claim-boundary, or private-material issues.
+8. Use **Edit Final** in Approval if the operator needs to adjust the final version before approval.
+9. Use **Approve**, then **Preflight** / **Preflight Payload** to run final safety and payload checks.
+10. Use **Execute** or **Post/Send** only after reviewing the preflight payload. Live posting/sending requires connector readiness and a typed confirmation.
+11. Use **Diagnostics** to see app logs, audit records, connector readiness, pipeline counts, triage counts, knowledge status, governed-learning counts, and runtime file paths.
+
+## Governed intake triage
+The Monitor tab includes a local Triage Agent for reducing noise before drafting:
+
+- `needs_reply`: direct X mentions/replies or emails that should be drafted for approval.
+- `relevant_no_reply_needed`: relevant search/monitoring items that may inform an original post, but should not be auto-replied to.
+- `spam`, `unrelated`, `low_quality`: local archive candidates.
+- `escalate`: legal, press, security, complaint, contract, or sensitive cases requiring human review first.
+
+Triage preserves the raw intake text and adds structured metadata: label, confidence, product match, reason tags, recommended action, and waiting-reply status. **Archive Noise** only changes local status to `archived`; it does not delete posts, emails, or external records.
+
+Optional automation flags:
+
+```yaml
+ENABLE_AUTO_TRIAGE: false
+AUTO_ARCHIVE_HIGH_CONFIDENCE_SPAM: false
+AUTO_DRAFT_RELEVANT_REPLIES: false
+AUTO_TRIAGE_CONFIDENCE_THRESHOLD: "0.90"
+```
+
+`AUTO_DRAFT_RELEVANT_REPLIES` creates drafts only in the approval queue. It never posts or sends.
 
 ## Admin settings
 Open **Settings -> Admin** in the desktop console to enter X API credentials, email IMAP/SMTP credentials, monitor settings, and feature flags. Click **Save Admin Settings** to persist them beside the exe:
@@ -125,6 +148,9 @@ ENABLE_EMAIL_SEND: false
 REQUIRE_HUMAN_APPROVAL: true
 ALLOW_KEYWORD_SEARCH_AUTO_REPLY: false
 ALLOW_UNSOLICITED_DM: false
+ENABLE_AUTO_TRIAGE: false
+AUTO_ARCHIVE_HIGH_CONFIDENCE_SPAM: false
+AUTO_DRAFT_RELEVANT_REPLIES: false
 ```
 
 To enable read-only monitoring, set `ENABLE_X_READ=true` and/or `ENABLE_EMAIL_READ=true`, then provide the matching environment variables from `.env.example`.

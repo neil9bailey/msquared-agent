@@ -18,6 +18,7 @@ from msquared_agent.interactive_agent import agent_status, ask_agent, create_age
 from msquared_agent.intake_store import add_intake_item, list_intake, update_intake_status
 from msquared_agent.intake_triage import intake_triage_status, triage_all_intake, waiting_reply_items
 from msquared_agent.legal_agent import review_approval_item
+from msquared_agent.monitor_intelligence import build_monitor_intelligence_snapshot, format_monitor_intelligence
 from msquared_agent.paths import app_root
 from msquared_agent.product_knowledge import build_product_knowledge_index, build_validation_packet, knowledge_status
 from msquared_agent.risk_classifier import classify_action
@@ -331,7 +332,7 @@ class MSquaredDesktopApp(tk.Tk):
         context_picker = ttk.Combobox(
             context_controls,
             textvariable=self.agent_context_source,
-            values=("auto", "selected_intake", "selected_draft", "none"),
+            values=("auto", "monitor_intelligence", "selected_intake", "selected_draft", "none"),
             width=16,
             state="readonly",
         )
@@ -1054,6 +1055,7 @@ class MSquaredDesktopApp(tk.Tk):
 
     def _create_drafts_for_waiting_replies(self, max_items: int = 25) -> dict:
         waiting = waiting_reply_items()
+        monitor_snapshot = build_monitor_intelligence_snapshot()
         existing_source_ids = {
             item.get("source_intake_id")
             for item in list_queue()
@@ -1077,7 +1079,12 @@ class MSquaredDesktopApp(tk.Tk):
                 draft = create_agent_draft(
                     content_type,
                     draft_input or action_summary(intake),
-                    {"source": intake, "action": action, "knowledge_mode": self.agent_knowledge_mode.get()},
+                    {
+                        "source": intake,
+                        "action": action,
+                        "knowledge_mode": self.agent_knowledge_mode.get(),
+                        "monitor_intelligence": monitor_snapshot,
+                    },
                 )
             except Exception as exc:
                 result["errors"].append({"intake_id": intake.get("id"), "error": str(exc)})
@@ -1154,7 +1161,10 @@ class MSquaredDesktopApp(tk.Tk):
             item = self._selected_queue_item()
             if item:
                 selected = {"kind": "draft", "item": item}
-        return {"selected": selected} if selected else {}
+        context = {"selected": selected} if selected else {}
+        if source in {"auto", "monitor_intelligence"}:
+            context["monitor_intelligence"] = build_monitor_intelligence_snapshot()
+        return context
 
     def _update_agent_status_label(self):
         if not hasattr(self, "agent_status_label"):
@@ -1172,8 +1182,12 @@ class MSquaredDesktopApp(tk.Tk):
         self._update_knowledge_status_label()
         intake, draft = self._action_center_items()
         summary = action_summary(intake, draft)
+        context = self._current_agent_context()
+        monitor = context.get("monitor_intelligence")
         if not intake and not draft:
-            summary = summarize_context(self._current_agent_context())
+            summary = summarize_context(context)
+        elif monitor:
+            summary = f"{summary}\n\n{format_monitor_intelligence(monitor, max_items=6)}"
         self._set_text(self.agent_context_box, summary)
         self._update_knowledge_used_box(draft)
         self._update_action_center_buttons()
@@ -1408,6 +1422,7 @@ class MSquaredDesktopApp(tk.Tk):
             "source": intake,
             "action": action,
             "knowledge_mode": self.agent_knowledge_mode.get(),
+            "monitor_intelligence": build_monitor_intelligence_snapshot(),
         }
         try:
             item = create_agent_draft(content_type, draft_input, context)

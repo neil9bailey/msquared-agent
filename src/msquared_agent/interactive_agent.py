@@ -7,6 +7,7 @@ from .agent import generate_draft
 from .app_log import log_event
 from .env_loader import DEFAULT_OPENAI_MODEL, env_bool, get_env, load_env_file, mask_secret
 from .feedback_store import similar_approved_examples
+from .monitor_intelligence import format_monitor_intelligence
 from .paths import resource_path
 from .product_knowledge import format_knowledge_context, search_product_knowledge
 from .risk_classifier import classify_email
@@ -163,8 +164,9 @@ def create_agent_draft(content_type: str, prompt: str, context: dict | None = No
 def summarize_context(context: dict | None) -> str:
     context = context or {}
     selected = context.get("selected") or {}
+    monitor = context.get("monitor_intelligence") or {}
     if not selected:
-        return "No selected context."
+        return format_monitor_intelligence(monitor, max_items=8) if monitor else "No selected context."
 
     kind = selected.get("kind", "item")
     item = selected.get("item") or {}
@@ -186,6 +188,14 @@ def summarize_context(context: dict | None) -> str:
         parts.append(f"subject={subject}")
     if preview:
         parts.append(f"preview={preview}")
+    if monitor:
+        counts = monitor.get("counts") or {}
+        parts.append(
+            "monitor="
+            f"{counts.get('intake_active', 0)} active, "
+            f"{counts.get('waiting_reply', 0)} waiting reply, "
+            f"{counts.get('archive_candidates', 0)} archive candidates"
+        )
     return " | ".join(parts)
 
 
@@ -328,6 +338,7 @@ def _openai_status_code(exc: BaseException) -> int | None:
 def _local_agent_answer(prompt: str, context: dict) -> str:
     selected = (context or {}).get("selected") or {}
     item = selected.get("item") or {}
+    monitor = (context or {}).get("monitor_intelligence") or {}
     text = item.get("text") or item.get("body") or item.get("draft") or prompt
     subject = item.get("subject") or ""
     channel = item.get("channel") or "operator"
@@ -336,6 +347,13 @@ def _local_agent_answer(prompt: str, context: dict) -> str:
     knowledge_note = _local_knowledge_answer(prompt, knowledge_results)
 
     lower_prompt = prompt.lower()
+    if monitor and any(term in lower_prompt for term in ("monitor", "feed", "intake", "waiting", "reply", "spam", "archive")):
+        return (
+            f"{format_monitor_intelligence(monitor, max_items=10)}\n\n"
+            "Recommended operator flow: triage untriaged items, draft waiting replies into the approval queue, "
+            "archive high-confidence noise locally, and escalate sensitive cases before drafting.\n\n"
+            f"{knowledge_note}"
+        )
     if "summary" in lower_prompt or "summarise" in lower_prompt or "summarize" in lower_prompt:
         return (
             f"Selected context: {summarize_context(context)}\n\n"
@@ -403,21 +421,29 @@ def _render_history(history: list[dict]) -> str:
 
 def _render_context(context: dict) -> str:
     selected = context.get("selected") or {}
-    if not selected:
-        return "No selected intake or draft was included."
-    item = selected.get("item") or {}
-    safe = {
-        "kind": selected.get("kind"),
-        "id": item.get("id"),
-        "channel": item.get("channel"),
-        "source_type": item.get("source_type") or item.get("type"),
-        "status": item.get("status"),
-        "risk_level": item.get("risk_level"),
-        "subject": item.get("subject"),
-        "from": item.get("from") or item.get("author"),
-        "to": item.get("to"),
-        "text": _truncate(item.get("text") or item.get("body") or item.get("draft") or "", 5000),
-    }
+    monitor = context.get("monitor_intelligence") or {}
+    safe = {}
+    if selected:
+        item = selected.get("item") or {}
+        safe["selected"] = {
+            "kind": selected.get("kind"),
+            "id": item.get("id"),
+            "canonical_id": item.get("canonical_id"),
+            "channel": item.get("channel"),
+            "source_type": item.get("source_type") or item.get("type"),
+            "source_id": item.get("source_id"),
+            "status": item.get("status"),
+            "risk_level": item.get("risk_level"),
+            "subject": item.get("subject"),
+            "from": item.get("from") or item.get("author"),
+            "to": item.get("to"),
+            "triage": item.get("triage"),
+            "text": _truncate(item.get("text") or item.get("body") or item.get("draft") or "", 5000),
+        }
+    if monitor:
+        safe["monitor_intelligence"] = monitor
+    if not safe:
+        return "No selected intake, draft, or monitor intelligence was included."
     return json.dumps(safe, indent=2, default=str)
 
 
@@ -464,11 +490,16 @@ def _local_knowledge_answer(prompt: str, results: list[dict]) -> str:
 def _context_digest(context: dict) -> dict:
     selected = (context or {}).get("selected") or {}
     item = selected.get("item") or {}
+    monitor = (context or {}).get("monitor_intelligence") or {}
+    counts = monitor.get("counts") or {}
     return {
         "kind": selected.get("kind"),
         "id": item.get("id"),
         "channel": item.get("channel"),
         "status": item.get("status"),
+        "monitor_intake_active": counts.get("intake_active"),
+        "monitor_waiting_reply": counts.get("waiting_reply"),
+        "monitor_archive_candidates": counts.get("archive_candidates"),
     }
 
 
